@@ -294,6 +294,11 @@ export class ZoneController {
     const token = authHeader.replace('Bearer ', '');
     const validToken = process.env.ADMIN_TOKEN;
     
-    return validToken && token === validToken;
+    // Correction: s'assurer que validToken n'est pas undefined
+    if (!validToken) {
+      return false;
+    }
+    
+    return token === validToken;
   }
 }

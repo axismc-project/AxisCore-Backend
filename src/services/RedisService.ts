@@ -10,10 +10,15 @@ export class RedisService {
   private subscriber: RedisClientType | null = null;
 
   async init(): Promise<void> {
-    this.client = await RedisConfig.getClient();
-    this.publisher = await RedisConfig.getPublisher();
-    this.subscriber = await RedisConfig.getSubscriber();
-    logger.info('RedisService initialisé');
+    try {
+      this.client = await RedisConfig.getClient();
+      this.publisher = await RedisConfig.getPublisher();
+      this.subscriber = await RedisConfig.getSubscriber();
+      logger.info('RedisService initialisé');
+    } catch (error) {
+      logger.error('Erreur initialisation RedisService:', error);
+      throw error;
+    }
   }
 
   private getClient(): RedisClientType {
@@ -66,12 +71,12 @@ export class RedisService {
       }
       
       return {
-        regionId: data.region_id ? parseInt(data.region_id) : null,
-        regionName: data.region_name || null,
-        nodeId: data.node_id ? parseInt(data.node_id) : null,
-        nodeName: data.node_name || null,
-        cityId: data.city_id ? parseInt(data.city_id) : null,
-        cityName: data.city_name || null
+        regionId: data.region_id && data.region_id !== '' ? parseInt(data.region_id) : null,
+        regionName: data.region_name && data.region_name !== '' ? data.region_name : null,
+        nodeId: data.node_id && data.node_id !== '' ? parseInt(data.node_id) : null,
+        nodeName: data.node_name && data.node_name !== '' ? data.node_name : null,
+        cityId: data.city_id && data.city_id !== '' ? parseInt(data.city_id) : null,
+        cityName: data.city_name && data.city_name !== '' ? data.city_name : null
       };
     } catch (error) {
       logger.error(`Erreur getChunkZone ${chunkX},${chunkZ}:`, error);
@@ -98,8 +103,17 @@ export class RedisService {
       const keys = await client.keys(pattern);
       if (keys.length === 0) return 0;
       
-      await client.del(keys);
-      return keys.length;
+      // Traiter par batch pour éviter de surcharger Redis
+      const batchSize = 1000;
+      let deletedCount = 0;
+      
+      for (let i = 0; i < keys.length; i += batchSize) {
+        const batch = keys.slice(i, i + batchSize);
+        await client.del(batch);
+        deletedCount += batch.length;
+      }
+      
+      return deletedCount;
     } catch (error) {
       logger.error(`Erreur deleteChunkZonesByPattern ${pattern}:`, error);
       throw new Error('Impossible de supprimer les zones par pattern');
@@ -203,9 +217,9 @@ export class RedisService {
       }
       
       return {
-        region_id: data.region_id ? parseInt(data.region_id) : undefined,
-        node_id: data.node_id ? parseInt(data.node_id) : undefined,
-        city_id: data.city_id ? parseInt(data.city_id) : undefined,
+        region_id: data.region_id && data.region_id !== '' ? parseInt(data.region_id) : undefined,
+        node_id: data.node_id && data.node_id !== '' ? parseInt(data.node_id) : undefined,
+        city_id: data.city_id && data.city_id !== '' ? parseInt(data.city_id) : undefined,
         last_update: parseInt(lastUpdate)
       };
     } catch (error) {
@@ -334,7 +348,7 @@ export class RedisService {
     }
   }
 
-  private async addEventToStream(event: ZoneEvent): Promise<void> {
+ private async addEventToStream(event: ZoneEvent): Promise<void> {
     const client = this.getClient();
     
     try {
@@ -347,9 +361,13 @@ export class RedisService {
         timestamp: event.timestamp.toString()
       });
 
-      await client.xTrim('events:zone', 'MAXLEN', { count: 10000, strategyModifier: '~' });
+      // Correction: utiliser la syntaxe correcte pour xTrim
+      await client.xTrim('events:zone', 'MAXLEN', 10000, {
+        strategyModifier: '~'
+      });
     } catch (error) {
       logger.error('Erreur addEventToStream:', error);
+      // Ne pas faire échouer la publication pour une erreur de stream
     }
   }
 
@@ -358,6 +376,7 @@ export class RedisService {
     activePlayers: number;
     cachedChunks: number;
     memoryUsage: string;
+    connectionStatus: string;
   }> {
     const client = this.getClient();
     
@@ -371,19 +390,28 @@ export class RedisService {
       return {
         activePlayers: playerKeys.length,
         cachedChunks: chunkKeys.length,
-        memoryUsage: this.parseMemoryInfo(memoryInfo)
+        memoryUsage: this.parseMemoryInfo(memoryInfo),
+        connectionStatus: 'connected'
       };
     } catch (error) {
       logger.error('Erreur getStats:', error);
-      throw new Error('Impossible de récupérer les statistiques Redis');
+      return {
+        activePlayers: 0,
+        cachedChunks: 0,
+        memoryUsage: 'Unknown',
+        connectionStatus: 'error'
+      };
     }
   }
 
   private parseMemoryInfo(info: string): string {
-    const lines = info.split('\r\n');
-    const memoryLine = lines.find(line => line.startsWith('used_memory_human:'));
-    const result = memoryLine ? memoryLine.split(':')[1] : undefined;
-    return result || 'Unknown';
+    try {
+      const lines = info.split('\r\n');
+      const memoryLine = lines.find(line => line.startsWith('used_memory_human:'));
+      return memoryLine ? memoryLine.split(':')[1] : 'Unknown';
+    } catch (error) {
+      return 'Unknown';
+    }
   }
 
   // ========== NETTOYAGE ==========
@@ -393,28 +421,39 @@ export class RedisService {
   }> {
     const client = this.getClient();
     const now = Date.now();
-    const maxAge = 24 * 60 * 60 * 1000;
+    const maxAge = 24 * 60 * 60 * 1000; // 24 heures
+    
+    let deletedPlayers = 0;
+    let deletedZones = 0;
     
     try {
+      // Nettoyer les positions de joueurs expirées
       const playerKeys = await client.keys('player:pos:*');
-      let deletedPlayers = 0;
       
       for (const key of playerKeys) {
-        const timestamp = await client.hGet(key, 'timestamp');
-        if (timestamp && (now - parseInt(timestamp)) > maxAge) {
-          await client.del(key);
-          deletedPlayers++;
+        try {
+          const timestamp = await client.hGet(key, 'timestamp');
+          if (timestamp && (now - parseInt(timestamp)) > maxAge) {
+            await client.del(key);
+            deletedPlayers++;
+          }
+        } catch (error) {
+          logger.debug(`Erreur nettoyage clé ${key}:`, error);
         }
       }
 
+      // Nettoyer les zones de joueurs expirées
       const zoneKeys = await client.keys('player:zones:*');
-      let deletedZones = 0;
       
       for (const key of zoneKeys) {
-        const lastUpdate = await client.hGet(key, 'last_update');
-        if (lastUpdate && (now - parseInt(lastUpdate)) > maxAge) {
-          await client.del(key);
-          deletedZones++;
+        try {
+          const lastUpdate = await client.hGet(key, 'last_update');
+          if (lastUpdate && (now - parseInt(lastUpdate)) > maxAge) {
+            await client.del(key);
+            deletedZones++;
+          }
+        } catch (error) {
+          logger.debug(`Erreur nettoyage clé ${key}:`, error);
         }
       }
 
@@ -427,6 +466,41 @@ export class RedisService {
     } catch (error) {
       logger.error('Erreur cleanupExpiredData:', error);
       throw new Error('Impossible de nettoyer les données expirées');
+    }
+  }
+
+  // ========== SANTÉ ET MONITORING ==========
+  async ping(): Promise<boolean> {
+    try {
+      const client = this.getClient();
+      const result = await client.ping();
+      return result === 'PONG';
+    } catch (error) {
+      logger.error('Erreur ping Redis:', error);
+      return false;
+    }
+  }
+
+  // ========== NETTOYAGE À LA FERMETURE ==========
+  async destroy(): Promise<void> {
+    logger.info('🛑 Fermeture RedisService...');
+    
+    try {
+      if (this.client) {
+        await this.client.quit();
+        this.client = null;
+      }
+      if (this.publisher) {
+        await this.publisher.quit();
+        this.publisher = null;
+      }
+      if (this.subscriber) {
+        await this.subscriber.quit();
+        this.subscriber = null;
+      }
+      logger.info('✅ RedisService fermé');
+    } catch (error) {
+      logger.error('Erreur fermeture RedisService:', error);
     }
   }
 }
