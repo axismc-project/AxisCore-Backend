@@ -22,7 +22,6 @@ export const NodeSchema = z.object({
   region_id: z.number().int().positive(),
   chunk_boundary: PolygonSchema,
   boundary_cache: z.string(),
-  node_level: z.number().int().min(1).max(10),
   experience_points: z.number().int().min(0),
   is_active: z.boolean(),
   created_at: z.date(),
@@ -36,7 +35,6 @@ export const CitySchema = z.object({
   node_id: z.number().int().positive(),
   chunk_boundary: PolygonSchema,
   boundary_cache: z.string(),
-  city_level: z.number().int().min(1).max(10),
   population: z.number().int().min(0),
   max_population: z.number().int().positive(),
   is_active: z.boolean(),
@@ -80,12 +78,10 @@ export interface ZoneHierarchy {
   node_id?: number;
   node_name?: string;
   node_description?: string;
-  node_level?: number;
   node_active?: boolean;
   city_id?: number;
   city_name?: string;
   city_description?: string;
-  city_level?: number;
   population?: number;
   city_active?: boolean;
 }

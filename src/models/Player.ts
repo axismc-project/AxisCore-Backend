@@ -39,7 +39,5 @@ export interface PlayerWithZones extends Player {
   region_name?: string;
   node_name?: string;
   city_name?: string;
-  node_level?: number;
-  city_level?: number;
   population?: number;
 }

@@ -229,12 +229,10 @@ export class DatabaseService {
         n.id as node_id,
         n.name as node_name,
         n.description as node_description,
-        n.node_level,
         n.is_active as node_active,
         c.id as city_id,
         c.name as city_name,
         c.description as city_description,
-        c.city_level,
         c.population,
         c.is_active as city_active
       FROM regions r
@@ -287,9 +285,7 @@ export class DatabaseService {
         p.*,
         r.name as region_name,
         n.name as node_name,
-        n.node_level,
         c.name as city_name,
-        c.city_level,
         c.population
       FROM players p
       LEFT JOIN regions r ON p.region_id = r.id
@@ -594,14 +590,14 @@ async createZone(
       params = [name, description, JSON.stringify(polygon), JSON.stringify(polygon)];
     } else if (zoneType === 'node') {
       query = `
-        INSERT INTO nodes (name, description, region_id, chunk_boundary, boundary_cache, node_level, experience_points, is_active)
+        INSERT INTO nodes (name, description, region_id, chunk_boundary, boundary_cache, experience_points, is_active)
         VALUES ($1, $2, $3, $4, $5, 1, 0, true)
         RETURNING id
       `;
       params = [name, description, parentId, JSON.stringify(polygon), JSON.stringify(polygon)];
     } else {
       query = `
-        INSERT INTO cities (name, description, node_id, chunk_boundary, boundary_cache, city_level, population, max_population, is_active)
+        INSERT INTO cities (name, description, node_id, chunk_boundary, boundary_cache, population, max_population, is_active)
         VALUES ($1, $2, $3, $4, $5, 1, 0, 100, true)
         RETURNING id
       `;
