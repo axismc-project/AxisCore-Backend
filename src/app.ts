@@ -338,7 +338,12 @@ class Application {
           health: '/api/health',
           admin: '/api/admin/*'
         },
-        websocket: 'ws://localhost:3000/ws/zones'
+        websocket: {
+          url: 'ws://localhost:3000/ws/zones',
+          authentication: 'API Key required (query param: ?api_key=xxx)',
+          permissions: 'zone:read required',
+          description: 'Real-time zone events broadcast (read-only)'
+        }
       });
     });
 
@@ -482,7 +487,8 @@ class Application {
           zones: ['GET /api/chunk/:x/:z', 'GET /api/zones/hierarchy', 'GET /api/zone/:type/:id'],
           players: ['POST /api/player/create', 'GET /api/player/:uuid', 'POST /api/player/:uuid/position'],
           monitoring: ['GET /api/stats', 'GET /api/health', 'GET /api/system'],
-          admin: ['POST /api/admin/sync', 'GET /api/admin/api-keys/stats']
+          admin: ['POST /api/admin/sync', 'GET /api/admin/api-keys/stats'],
+          websocket: 'ws://localhost:3000/ws/zones?api_key=your_key'
         }
       });
     });
@@ -547,7 +553,8 @@ class Application {
           rateLimitPerHour: rateLimitPerHour || 1000,
           expiresAt
         },
-        warning: 'This API key will only be shown once. Please save it securely.'
+        warning: 'This API key will only be shown once. Please save it securely.',
+        websocketUsage: `ws://localhost:3000/ws/zones?api_key=${apiKey}`
       });
 
     } catch (error) {
@@ -791,8 +798,11 @@ class Application {
           inProgress: this.syncService.isSyncInProgress()
         },
         websocket: {
-          connected: this.wsServer?.getConnectedPlayersCount() || 0,
-          players: this.wsServer?.getConnectedPlayers() || []
+          connected: this.wsServer?.getConnectedClientsCount() || 0,
+          clients: this.wsServer?.getConnectedClients() || [],
+          endpoint: 'ws://localhost:3000/ws/zones',
+          authenticationRequired: true,
+          requiredPermission: 'zone:read'
         },
         authentication: {
           currentKey: apiKey?.keyName,
@@ -871,37 +881,39 @@ class Application {
     });
   }
 
-  // ========== APPLICATION LIFECYCLE ==========
-
-  async start(): Promise<void> {
-    try {
-      const port = process.env.PORT || 3000;
-      
-      logger.info('Starting Minecraft Zones Backend');
-      
-      // 1. Validate environment
-      this.validateEnvironment();
-      
-      // 2. Initialize Redis
-      await this.redisService.init();
-      logger.info('Redis initialized successfully');
-      
-      // 3. Test PostgreSQL
-      const dbConnected = await DatabaseConfig.testConnection();
-      if (!dbConnected) {
-        throw new Error('Unable to connect to PostgreSQL');
-      }
-      logger.info('PostgreSQL connected successfully');
-      
-      // 4. Initialize sync service
-    await this.syncService.init();
+async start(): Promise<void> {
+   try {
+     const port = process.env.PORT || 3000;
+     
+     logger.info('Starting Minecraft Zones Backend');
+     
+     // 1. Validate environment
+     this.validateEnvironment();
+     
+     // 2. Initialize Redis
+     await this.redisService.init();
+     logger.info('Redis initialized successfully');
+     
+     // 3. Test PostgreSQL
+     const dbConnected = await DatabaseConfig.testConnection();
+     if (!dbConnected) {
+       throw new Error('Unable to connect to PostgreSQL');
+     }
+     logger.info('PostgreSQL connected successfully');
+     
+     // 4. Initialize sync service
+     await this.syncService.init();
      logger.info('Synchronization service initialized successfully');
      
      // 5. Start HTTP server
      this.server = createServer(this.app);
      
-     // 6. Initialize WebSocket
-     this.wsServer = new ZoneWebSocketServer(this.server, this.redisService);
+     // 6. Initialize WebSocket with API Key service
+     this.wsServer = new ZoneWebSocketServer(
+       this.server, 
+       this.redisService,
+       this.apiKeyService // ✅ Ajout du service API Key
+     );
      logger.info('WebSocket server initialized successfully');
      
      // 7. Start listening
@@ -920,19 +932,23 @@ class Application {
        environment: process.env.NODE_ENV || 'development'
      });
      
-     logger.info('📡 WebSocket available', { 
-       endpoint: `ws://localhost:${port}/ws/zones` 
+     logger.info('📡 WebSocket Zone Events available', { 
+       endpoint: `ws://localhost:${port}/ws/zones`,
+       authentication: 'API Key required (?api_key=xxx)',
+       permissions: 'zone:read required',
+       description: 'Read-only zone events broadcast'
      });
      
-     logger.info('🌐 API available', { 
+     logger.info('🌐 REST API available', { 
        endpoint: `http://localhost:${port}/api`,
        documentation: 'Check GET / for endpoint list'
      });
      
      logger.info('🔐 Authentication', {
-       method: 'API Key required',
+       method: 'API Key required for all endpoints (except health)',
        headers: ['Authorization: Bearer <key>', 'X-API-Key: <key>'],
-       management: `POST /api/admin/api-keys (admin required)`
+       management: `POST /api/admin/api-keys (admin required)`,
+       websocket: 'Query param: ?api_key=<key> OR Authorization header'
      });
      
      // 8. Setup graceful shutdown
