@@ -1,6 +1,5 @@
 import { DatabaseService } from './DatabaseService';
 import { logger } from '../utils/logger';
-import crypto from 'crypto';
 
 interface PlayerUpdate {
   uuid: string;
@@ -13,11 +12,11 @@ interface PlayerUpdate {
   regionId?: number;
   nodeId?: number;
   cityId?: number;
-  timestamp: number;
+  // ✅ FIX: timestamp is automatically added in queuePlayerUpdate
 }
 
 export class DatabaseBatchService {
-  private pendingUpdates = new Map<string, PlayerUpdate>();
+  private pendingUpdates = new Map<string, PlayerUpdate & { timestamp: number }>();
   private batchInterval: NodeJS.Timeout | null = null;
   private isProcessing = false;
   private readonly batchSize: number;
@@ -44,10 +43,11 @@ export class DatabaseBatchService {
     });
   }
 
-  queuePlayerUpdate(update: Omit<PlayerUpdate, 'timestamp'>): void {
-    const playerUpdate: PlayerUpdate = {
+  // ✅ FIX: timestamp is added automatically here
+  queuePlayerUpdate(update: PlayerUpdate): void {
+    const playerUpdate = {
       ...update,
-      timestamp: Date.now()
+      timestamp: Date.now() // ✅ Add timestamp automatically
     };
 
     this.pendingUpdates.set(update.uuid, playerUpdate);
