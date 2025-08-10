@@ -4,6 +4,20 @@ import { Region, Node, City, ZoneHierarchy, PostgresNotification } from '../mode
 import { Player, PlayerWithZones } from '../models/Player';
 import { logger } from '../utils/logger';
 
+interface PlayerBatchUpdate {
+  uuid: string;
+  name: string;
+  x: number;
+  y: number;
+  z: number;
+  chunkX: number;
+  chunkZ: number;
+  regionId?: number;
+  nodeId?: number;
+  cityId?: number;
+  timestamp: number;
+}
+
 export class DatabaseService {
   private pool: Pool;
 
@@ -11,20 +25,54 @@ export class DatabaseService {
     this.pool = DatabaseConfig.getInstance();
   }
 
+  // Helper function to safely parse JSON
+  private safeJsonParse(jsonString: any, fallback: any = []): any {
+    try {
+      if (typeof jsonString === 'string') {
+        return JSON.parse(jsonString);
+      } else if (typeof jsonString === 'object' && jsonString !== null) {
+        // Already parsed by PostgreSQL driver
+        return jsonString;
+      } else {
+        logger.warn('Invalid JSON data type', { type: typeof jsonString, value: jsonString });
+        return fallback;
+      }
+    } catch (error) {
+      logger.error('Failed to parse JSON', { 
+        jsonString, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      return fallback;
+    }
+  }
+
   // ========== ZONES ==========
   async getAllRegions(): Promise<Region[]> {
     const query = 'SELECT * FROM regions WHERE is_active = true ORDER BY name';
     try {
       const result = await this.pool.query(query);
-      return result.rows.map(row => ({
-        ...row,
-        chunk_boundary: JSON.parse(row.chunk_boundary),
-        created_at: new Date(row.created_at),
-        updated_at: new Date(row.updated_at)
-      }));
+      return result.rows.map(row => {
+        try {
+          return {
+            ...row,
+            chunk_boundary: this.safeJsonParse(row.chunk_boundary, []),
+            created_at: new Date(row.created_at),
+            updated_at: new Date(row.updated_at)
+          };
+        } catch (error) {
+          logger.error('Failed to process region row', { 
+            regionId: row.id, 
+            regionName: row.name,
+            error: error instanceof Error ? error.message : 'Unknown error' 
+          });
+          throw error;
+        }
+      });
     } catch (error) {
-      logger.error('Erreur getAllRegions:', error);
-      throw new Error('Impossible de récupérer les régions');
+      logger.error('Failed to fetch regions', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to fetch regions');
     }
   }
 
@@ -32,15 +80,28 @@ export class DatabaseService {
     const query = 'SELECT * FROM nodes WHERE is_active = true ORDER BY region_id, name';
     try {
       const result = await this.pool.query(query);
-      return result.rows.map(row => ({
-        ...row,
-        chunk_boundary: JSON.parse(row.chunk_boundary),
-        created_at: new Date(row.created_at),
-        updated_at: new Date(row.updated_at)
-      }));
+      return result.rows.map(row => {
+        try {
+          return {
+            ...row,
+            chunk_boundary: this.safeJsonParse(row.chunk_boundary, []),
+            created_at: new Date(row.created_at),
+            updated_at: new Date(row.updated_at)
+          };
+        } catch (error) {
+          logger.error('Failed to process node row', { 
+            nodeId: row.id, 
+            nodeName: row.name,
+            error: error instanceof Error ? error.message : 'Unknown error' 
+          });
+          throw error;
+        }
+      });
     } catch (error) {
-      logger.error('Erreur getAllNodes:', error);
-      throw new Error('Impossible de récupérer les nodes');
+      logger.error('Failed to fetch nodes', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to fetch nodes');
     }
   }
 
@@ -48,15 +109,113 @@ export class DatabaseService {
     const query = 'SELECT * FROM cities WHERE is_active = true ORDER BY node_id, name';
     try {
       const result = await this.pool.query(query);
+      return result.rows.map(row => {
+        try {
+          return {
+            ...row,
+            chunk_boundary: this.safeJsonParse(row.chunk_boundary, []),
+            created_at: new Date(row.created_at),
+            updated_at: new Date(row.updated_at)
+          };
+        } catch (error) {
+          logger.error('Failed to process city row', { 
+            cityId: row.id, 
+            cityName: row.name,
+            error: error instanceof Error ? error.message : 'Unknown error' 
+          });
+          throw error;
+        }
+      });
+    } catch (error) {
+      logger.error('Failed to fetch cities', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to fetch cities');
+    }
+  }
+
+  async getAllOnlinePlayers(): Promise<Player[]> {
+    const query = `
+      SELECT * FROM players 
+      WHERE is_online = true 
+      ORDER BY last_updated DESC
+    `;
+
+    try {
+      const result = await this.pool.query(query);
       return result.rows.map(row => ({
         ...row,
-        chunk_boundary: JSON.parse(row.chunk_boundary),
-        created_at: new Date(row.created_at),
-        updated_at: new Date(row.updated_at)
+        last_updated: new Date(row.last_updated)
       }));
     } catch (error) {
-      logger.error('Erreur getAllCities:', error);
-      throw new Error('Impossible de récupérer les villes');
+      logger.error('Failed to fetch online players', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to fetch online players');
+    }
+  }
+
+  async batchUpdatePlayers(updates: PlayerBatchUpdate[]): Promise<void> {
+    if (updates.length === 0) return;
+
+    const client = await this.pool.connect();
+    
+    try {
+      await client.query('BEGIN');
+
+      // Prepare batch insert/update using UNNEST
+      const values = updates.map((update, index) => {
+        const baseIndex = index * 11;
+        return `($${baseIndex + 1}, $${baseIndex + 2}, $${baseIndex + 3}, $${baseIndex + 4}, $${baseIndex + 5}, $${baseIndex + 6}, $${baseIndex + 7}, $${baseIndex + 8}, $${baseIndex + 9}, $${baseIndex + 10}, $${baseIndex + 11})`;
+      }).join(',');
+
+      const flatParams = updates.flatMap(update => [
+        update.uuid,
+        update.name,
+        update.x,
+        update.y,
+        update.z,
+        update.chunkX,
+        update.chunkZ,
+        update.regionId || null,
+        update.nodeId || null,
+        update.cityId || null,
+        new Date(update.timestamp)
+      ]);
+
+      const query = `
+        INSERT INTO players (
+          player_uuid, player_name, x, y, z, chunk_x, chunk_z,
+          region_id, node_id, city_id, last_updated
+        ) 
+        VALUES ${values}
+        ON CONFLICT (player_uuid) DO UPDATE SET
+          player_name = EXCLUDED.player_name,
+          x = EXCLUDED.x,
+          y = EXCLUDED.y,
+          z = EXCLUDED.z,
+          chunk_x = EXCLUDED.chunk_x,
+          chunk_z = EXCLUDED.chunk_z,
+          region_id = EXCLUDED.region_id,
+          node_id = EXCLUDED.node_id,
+          city_id = EXCLUDED.city_id,
+          last_updated = EXCLUDED.last_updated,
+          is_online = true,
+          redis_synced = false
+      `;
+
+      await client.query(query, flatParams);
+      await client.query('COMMIT');
+
+    } catch (error) {
+      await client.query('ROLLBACK');
+      logger.error('Batch update players failed', { 
+        error: error instanceof Error ? error.message : 'Unknown error',
+        playersCount: updates.length 
+      });
+      throw error;
+    } finally {
+      client.release();
     }
   }
 
@@ -89,8 +248,10 @@ export class DatabaseService {
       const result = await this.pool.query(query);
       return result.rows;
     } catch (error) {
-      logger.error('Erreur getZoneHierarchy:', error);
-      throw new Error('Impossible de récupérer la hiérarchie des zones');
+      logger.error('Failed to fetch zone hierarchy', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to fetch zone hierarchy');
     }
   }
 
@@ -105,13 +266,17 @@ export class DatabaseService {
       const row = result.rows[0];
       return {
         ...row,
-        chunk_boundary: JSON.parse(row.chunk_boundary),
+        chunk_boundary: this.safeJsonParse(row.chunk_boundary, []),
         created_at: new Date(row.created_at),
         updated_at: new Date(row.updated_at)
       };
     } catch (error) {
-      logger.error(`Erreur getZoneById ${zoneType}:${id}:`, error);
-      throw new Error(`Impossible de récupérer la zone ${zoneType}:${id}`);
+      logger.error('Failed to fetch zone by ID', { 
+        zoneType, 
+        zoneId: id, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error(`Unable to fetch zone ${zoneType}:${id}`);
     }
   }
 
@@ -143,8 +308,11 @@ export class DatabaseService {
         last_updated: new Date(row.last_updated)
       };
     } catch (error) {
-      logger.error('Erreur getPlayerByUuid:', error);
-      throw new Error('Impossible de récupérer le joueur');
+      logger.error('Failed to fetch player by UUID', { 
+        uuid, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to fetch player');
     }
   }
 
@@ -163,8 +331,12 @@ export class DatabaseService {
         last_updated: new Date(row.last_updated)
       }));
     } catch (error) {
-      logger.error(`Erreur getPlayersInZone ${zoneType}:${zoneId}:`, error);
-      throw new Error(`Impossible de récupérer les joueurs de la zone ${zoneType}:${zoneId}`);
+      logger.error('Failed to fetch players in zone', { 
+        zoneType, 
+        zoneId, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error(`Unable to fetch players in zone ${zoneType}:${zoneId}`);
     }
   }
 
@@ -207,8 +379,11 @@ export class DatabaseService {
         regionId, nodeId, cityId
       ]);
     } catch (error) {
-      logger.error('Erreur updatePlayerPosition:', error);
-      throw new Error('Impossible de mettre à jour la position du joueur');
+      logger.error('Failed to update player position', { 
+        uuid, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to update player position');
     }
   }
 
@@ -240,9 +415,15 @@ export class DatabaseService {
         x, y, z, chunkX, chunkZ, metadata ? JSON.stringify(metadata) : null
       ]);
     } catch (error) {
-      logger.error('Erreur logZoneEvent:', error);
-      // Ne pas faire échouer l'opération principale si le log échoue
-      logger.warn('Impossible de logger l\'événement de zone, continuation...');
+      logger.error('Failed to log zone event', { 
+        playerUuid, 
+        eventType, 
+        zoneType, 
+        zoneId,
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      // Don't throw - logging failure shouldn't break main operation
+      logger.warn('Zone event logging failed, continuing operation');
     }
   }
 
@@ -259,20 +440,221 @@ export class DatabaseService {
             const data = JSON.parse(msg.payload) as PostgresNotification;
             callback(data);
           } catch (error) {
-            logger.error('Erreur parsing notification PostgreSQL:', error);
+            logger.error('Failed to parse PostgreSQL notification', { 
+              error: error instanceof Error ? error.message : 'Unknown error' 
+            });
           }
         }
       });
 
-      logger.info('Écoute des notifications PostgreSQL démarrée');
+      logger.info('PostgreSQL notification listener started');
       return client;
     } catch (error) {
       client.release();
-      logger.error('Erreur listenToChanges:', error);
-      throw new Error('Impossible d\'écouter les changements PostgreSQL');
+      logger.error('Failed to setup PostgreSQL listener', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to listen to PostgreSQL changes');
     }
   }
 
+  // ========== DIAGNOSTICS ==========
+  async checkDatabaseIntegrity(): Promise<{
+    regionsWithInvalidJson: number;
+    nodesWithInvalidJson: number;
+    citiesWithInvalidJson: number;
+    totalIssues: number;
+  }> {
+    try {
+      const [regionsResult, nodesResult, citiesResult] = await Promise.all([
+        this.pool.query(`
+          SELECT id, name, chunk_boundary 
+          FROM regions 
+          WHERE is_active = true
+        `),
+        this.pool.query(`
+          SELECT id, name, chunk_boundary 
+          FROM nodes 
+          WHERE is_active = true
+        `),
+        this.pool.query(`
+          SELECT id, name, chunk_boundary 
+          FROM cities 
+          WHERE is_active = true
+        `)
+      ]);
+
+      let regionsWithInvalidJson = 0;
+      let nodesWithInvalidJson = 0;
+      let citiesWithInvalidJson = 0;
+
+      // Check regions
+      for (const row of regionsResult.rows) {
+        try {
+          this.safeJsonParse(row.chunk_boundary);
+        } catch {
+          regionsWithInvalidJson++;
+          logger.warn('Invalid JSON in region', { 
+            regionId: row.id, 
+            regionName: row.name 
+          });
+        }
+      }
+
+      // Check nodes
+      for (const row of nodesResult.rows) {
+        try {
+          this.safeJsonParse(row.chunk_boundary);
+        } catch {
+          nodesWithInvalidJson++;
+          logger.warn('Invalid JSON in node', { 
+            nodeId: row.id, 
+            nodeName: row.name 
+          });
+        }
+      }
+
+      // Check cities
+      for (const row of citiesResult.rows) {
+        try {
+          this.safeJsonParse(row.chunk_boundary);
+        } catch {
+          citiesWithInvalidJson++;
+          logger.warn('Invalid JSON in city', { 
+            cityId: row.id, 
+            cityName: row.name 
+          });
+        }
+      }
+
+      const totalIssues = regionsWithInvalidJson + nodesWithInvalidJson + citiesWithInvalidJson;
+
+      return {
+        regionsWithInvalidJson,
+        nodesWithInvalidJson,
+        citiesWithInvalidJson,
+        totalIssues
+      };
+    } catch (error) {
+      logger.error('Failed to check database integrity', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to check database integrity');
+    }
+  }
+
+// Ajouter dans DatabaseService
+
+async updateZonePolygon(
+  zoneType: 'region' | 'node' | 'city', 
+  id: number, 
+  newPolygon: any[]
+): Promise<void> {
+  const tableName = zoneType === 'region' ? 'regions' : zoneType === 'node' ? 'nodes' : 'cities';
+  
+  const query = `
+    UPDATE ${tableName} 
+    SET chunk_boundary = $1, updated_at = CURRENT_TIMESTAMP
+    WHERE id = $2
+  `;
+
+  try {
+    await this.pool.query(query, [JSON.stringify(newPolygon), id]);
+  } catch (error) {
+    logger.error('Failed to update zone polygon', { 
+      zoneType, 
+      zoneId: id, 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
+    throw new Error('Unable to update zone polygon');
+  }
+}
+
+async createZone(
+  zoneType: 'region' | 'node' | 'city',
+  name: string,
+  description: string | null,
+  polygon: any[],
+  parentId?: number
+): Promise<number> {
+  const client = await this.pool.connect();
+  
+  try {
+    await client.query('BEGIN');
+    
+    let query: string;
+    let params: any[];
+    
+    if (zoneType === 'region') {
+      query = `
+        INSERT INTO regions (name, description, chunk_boundary, boundary_cache, is_active)
+        VALUES ($1, $2, $3, $4, true)
+        RETURNING id
+      `;
+      params = [name, description, JSON.stringify(polygon), JSON.stringify(polygon)];
+    } else if (zoneType === 'node') {
+      query = `
+        INSERT INTO nodes (name, description, region_id, chunk_boundary, boundary_cache, node_level, experience_points, is_active)
+        VALUES ($1, $2, $3, $4, $5, 1, 0, true)
+        RETURNING id
+      `;
+      params = [name, description, parentId, JSON.stringify(polygon), JSON.stringify(polygon)];
+    } else {
+      query = `
+        INSERT INTO cities (name, description, node_id, chunk_boundary, boundary_cache, city_level, population, max_population, is_active)
+        VALUES ($1, $2, $3, $4, $5, 1, 0, 100, true)
+        RETURNING id
+      `;
+      params = [name, description, parentId, JSON.stringify(polygon), JSON.stringify(polygon)];
+    }
+    
+    const result = await client.query(query, params);
+    const newId = result.rows[0].id;
+    
+    await client.query('COMMIT');
+    return newId;
+    
+  } catch (error) {
+    await client.query('ROLLBACK');
+    logger.error('Failed to create zone', { 
+      zoneType, 
+      name, 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
+    throw new Error('Unable to create zone');
+  } finally {
+    client.release();
+  }
+}
+// Ajouter dans DatabaseService
+
+async createPlayer(
+  uuid: string, 
+  name: string, 
+  x: number, 
+  y: number, 
+  z: number
+): Promise<void> {
+  const chunkX = Math.floor(x / 16);
+  const chunkZ = Math.floor(z / 16);
+
+  const query = `
+    INSERT INTO players (
+      player_uuid, player_name, x, y, z, chunk_x, chunk_z,
+      region_id, node_id, city_id, last_updated, is_online, redis_synced
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, NULL, NULL, CURRENT_TIMESTAMP, false, true)
+  `;
+
+  try {
+    await this.pool.query(query, [uuid, name, x, y, z, chunkX, chunkZ]);
+  } catch (error) {
+    logger.error('Failed to create player', { 
+      uuid, 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
+    throw new Error('Unable to create player');
+  }
+}
   // ========== STATISTIQUES ==========
   async getZoneStats(): Promise<{
     regionsCount: number;
@@ -301,8 +683,10 @@ export class DatabaseService {
         onlinePlayersCount: parseInt(row.online_players_count)
       };
     } catch (error) {
-      logger.error('Erreur getZoneStats:', error);
-      throw new Error('Impossible de récupérer les statistiques');
+      logger.error('Failed to fetch zone statistics', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to fetch statistics');
     }
   }
 }

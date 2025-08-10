@@ -2,12 +2,13 @@
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import js from '@eslint/js';
-import tseslint from 'typescript-eslint';
+import tseslint from '@typescript-eslint/eslint-plugin';
+import parser from '@typescript-eslint/parser';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-export default tseslint.config(
+export default [
   {
     ignores: [
       'node_modules/**',
@@ -18,16 +19,19 @@ export default tseslint.config(
     ]
   },
   js.configs.recommended,
-  ...tseslint.configs.recommended,
   {
     files: ['**/*.ts'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'module',
+      parser: parser,
       parserOptions: {
         projectService: true,
         tsconfigRootDir: __dirname,
       },
+    },
+    plugins: {
+      '@typescript-eslint': tseslint
     },
     rules: {
       '@typescript-eslint/no-unused-vars': 'warn',
@@ -36,4 +40,4 @@ export default tseslint.config(
       'no-console': 'off'
     }
   }
-);
+];

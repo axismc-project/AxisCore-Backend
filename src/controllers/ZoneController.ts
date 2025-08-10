@@ -3,6 +3,7 @@ import { RedisService } from '../services/RedisService';
 import { DatabaseService } from '../services/DatabaseService';
 import { ZoneSyncService } from '../services/ZoneSyncService';
 import { ChunkZoneDataSchema } from '../models/Zone';
+import { SecurityUtils } from '../utils/security';
 import { logger } from '../utils/logger';
 
 export class ZoneController {
@@ -17,19 +18,18 @@ export class ZoneController {
     try {
       const { chunkX, chunkZ } = req.params;
       
-      // Validation
       const x = parseInt(chunkX);
       const z = parseInt(chunkZ);
       
-      if (isNaN(x) || isNaN(z)) {
+      if (!SecurityUtils.isValidChunkCoordinate(x) || !SecurityUtils.isValidChunkCoordinate(z)) {
         res.status(400).json({ 
-          error: 'Coordonnées de chunk invalides',
-          message: 'chunkX et chunkZ doivent être des entiers'
+          error: 'Invalid chunk coordinates',
+          message: 'chunkX and chunkZ must be valid integers within bounds'
         });
         return;
       }
       
-      // Récupérer depuis Redis
+      // Get from Redis
       const zoneData = await this.redis.getChunkZone(x, z);
       
       if (!zoneData) {
@@ -41,7 +41,7 @@ export class ZoneController {
         return;
       }
       
-      // Valider les données
+      // Validate data
       const validatedData = ChunkZoneDataSchema.parse(zoneData);
       
       res.json({
@@ -51,10 +51,14 @@ export class ZoneController {
       });
       
     } catch (error) {
-      logger.error('Erreur getChunkZone:', error);
+      logger.error('Failed to get chunk zone', { 
+        chunkX: req.params.chunkX, 
+        chunkZ: req.params.chunkZ,
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
       res.status(500).json({ 
-        error: 'Erreur serveur',
-        message: 'Impossible de récupérer les zones du chunk'
+        error: 'Server error',
+        message: 'Unable to get chunk zones'
       });
     }
   }
@@ -64,16 +68,18 @@ export class ZoneController {
       const hierarchy = await this.db.getZoneHierarchy();
       
       res.json({
-        message: 'Hiérarchie des zones récupérée',
+        message: 'Zone hierarchy retrieved',
         count: hierarchy.length,
         data: hierarchy
       });
       
     } catch (error) {
-      logger.error('Erreur getZoneHierarchy:', error);
+      logger.error('Failed to get zone hierarchy', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
       res.status(500).json({ 
-        error: 'Erreur serveur',
-        message: 'Impossible de récupérer la hiérarchie des zones'
+        error: 'Server error',
+        message: 'Unable to get zone hierarchy'
       });
     }
   }
@@ -82,11 +88,10 @@ export class ZoneController {
     try {
       const { zoneType, zoneId } = req.params;
       
-      // Validation
       if (!['region', 'node', 'city'].includes(zoneType)) {
         res.status(400).json({ 
-          error: 'Type de zone invalide',
-          message: 'Type doit être: region, node, ou city'
+          error: 'Invalid zone type',
+          message: 'Type must be: region, node, or city'
         });
         return;
       }
@@ -94,33 +99,36 @@ export class ZoneController {
       const id = parseInt(zoneId);
       if (isNaN(id) || id <= 0) {
         res.status(400).json({ 
-          error: 'ID de zone invalide',
-          message: 'L\'ID doit être un entier positif'
+          error: 'Invalid zone ID',
+          message: 'ID must be a positive integer'
         });
         return;
       }
       
-      // Récupérer depuis DB
       const zone = await this.db.getZoneById(zoneType as any, id);
       
       if (!zone) {
         res.status(404).json({ 
-          error: 'Zone non trouvée',
-          message: `Aucune zone ${zoneType} avec l'ID ${id}`
+          error: 'Zone not found',
+          message: `No zone ${zoneType} with ID ${id}`
         });
         return;
       }
       
       res.json({
-        message: 'Zone trouvée',
+        message: 'Zone found',
         data: zone
       });
       
     } catch (error) {
-      logger.error('Erreur getZoneById:', error);
+      logger.error('Failed to get zone by ID', { 
+        zoneType: req.params.zoneType, 
+        zoneId: req.params.zoneId,
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
       res.status(500).json({ 
-        error: 'Erreur serveur',
-        message: 'Impossible de récupérer la zone'
+        error: 'Server error',
+        message: 'Unable to get zone'
       });
     }
   }
@@ -129,11 +137,10 @@ export class ZoneController {
     try {
       const { zoneType, zoneId } = req.params;
       
-      // Validation
       if (!['region', 'node', 'city'].includes(zoneType)) {
         res.status(400).json({ 
-          error: 'Type de zone invalide',
-          message: 'Type doit être: region, node, ou city'
+          error: 'Invalid zone type',
+          message: 'Type must be: region, node, or city'
         });
         return;
       }
@@ -141,25 +148,29 @@ export class ZoneController {
       const id = parseInt(zoneId);
       if (isNaN(id) || id <= 0) {
         res.status(400).json({ 
-          error: 'ID de zone invalide',
-          message: 'L\'ID doit être un entier positif'
+          error: 'Invalid zone ID',
+          message: 'ID must be a positive integer'
         });
         return;
       }
       
-      // Récupérer depuis Redis (plus rapide) avec fallback DB
+      // Get from Redis (faster) with database fallback
       let playerUuids: string[] = [];
       
       try {
         playerUuids = await this.redis.getPlayersInZone(zoneType as any, id);
       } catch (redisError) {
-        logger.warn('Redis indisponible, fallback vers DB:', redisError);
+        logger.warn('Redis unavailable, falling back to database', { 
+          zoneType, 
+          zoneId: id,
+          error: redisError instanceof Error ? redisError.message : 'Unknown error' 
+        });
         const players = await this.db.getPlayersInZone(zoneType as any, id);
         playerUuids = players.map(p => p.player_uuid);
       }
       
       res.json({
-        message: `Joueurs dans ${zoneType} ${id}`,
+        message: `Players in ${zoneType} ${id}`,
         zoneType,
         zoneId: id,
         playerCount: playerUuids.length,
@@ -167,10 +178,14 @@ export class ZoneController {
       });
       
     } catch (error) {
-      logger.error('Erreur getPlayersInZone:', error);
+      logger.error('Failed to get players in zone', { 
+        zoneType: req.params.zoneType, 
+        zoneId: req.params.zoneId,
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
       res.status(500).json({ 
-        error: 'Erreur serveur',
-        message: 'Impossible de récupérer les joueurs de la zone'
+        error: 'Server error',
+        message: 'Unable to get players in zone'
       });
     }
   }
@@ -181,16 +196,18 @@ export class ZoneController {
       const stats = await this.syncService.getDetailedStats();
       
       res.json({
-        message: 'Statistiques récupérées',
+        message: 'Statistics retrieved',
         timestamp: new Date().toISOString(),
         data: stats
       });
       
     } catch (error) {
-      logger.error('Erreur getStats:', error);
+      logger.error('Failed to get statistics', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
       res.status(500).json({ 
-        error: 'Erreur serveur',
-        message: 'Impossible de récupérer les statistiques'
+        error: 'Server error',
+        message: 'Unable to get statistics'
       });
     }
   }
@@ -202,20 +219,22 @@ export class ZoneController {
       const statusCode = health.isHealthy ? 200 : 503;
       
       res.status(statusCode).json({
-        message: health.isHealthy ? 'Service en bonne santé' : 'Problèmes détectés',
+        message: health.isHealthy ? 'Service healthy' : 'Issues detected',
         timestamp: new Date().toISOString(),
         data: health
       });
       
     } catch (error) {
-      logger.error('Erreur getHealth:', error);
+      logger.error('Failed to get health status', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
       res.status(500).json({ 
-        error: 'Erreur serveur',
-        message: 'Impossible de vérifier l\'état du service',
+        error: 'Server error',
+        message: 'Unable to check service health',
         timestamp: new Date().toISOString(),
         data: {
           isHealthy: false,
-          issues: ['Erreur interne du service de santé']
+          issues: ['Internal health service error']
         }
       });
     }
@@ -224,51 +243,51 @@ export class ZoneController {
   // ========== ENDPOINTS ADMINISTRATION ==========
   async forceSync(req: Request, res: Response): Promise<void> {
     try {
-      // Vérification de sécurité (à adapter selon votre système d'auth)
       const authHeader = req.headers.authorization;
       if (!authHeader || !this.isValidAdminToken(authHeader)) {
         res.status(401).json({ 
-          error: 'Non autorisé',
-          message: 'Token d\'administration requis'
+          error: 'Unauthorized',
+          message: 'Admin token required'
         });
         return;
       }
       
       if (this.syncService.isSyncInProgress()) {
         res.status(409).json({ 
-          error: 'Conflit',
-          message: 'Une synchronisation est déjà en cours'
+          error: 'Conflict',
+          message: 'Synchronization already in progress'
         });
         return;
       }
       
-      // Lancer sync en arrière-plan
+      // Start sync in background
       this.syncService.forceFreshSync().catch(error => {
-        logger.error('Erreur sync forcée:', error);
+        logger.error('Forced sync error', { error: error instanceof Error ? error.message : 'Unknown error' });
       });
       
       res.json({
-        message: 'Synchronisation forcée démarrée',
+        message: 'Forced synchronization started',
         timestamp: new Date().toISOString()
       });
       
     } catch (error) {
-      logger.error('Erreur forceSync:', error);
+      logger.error('Failed to force sync', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
       res.status(500).json({ 
-        error: 'Erreur serveur',
-        message: 'Impossible de démarrer la synchronisation'
+        error: 'Server error',
+        message: 'Unable to start synchronization'
       });
     }
   }
 
   async performCleanup(req: Request, res: Response): Promise<void> {
     try {
-      // Vérification de sécurité
       const authHeader = req.headers.authorization;
       if (!authHeader || !this.isValidAdminToken(authHeader)) {
         res.status(401).json({ 
-          error: 'Non autorisé',
-          message: 'Token d\'administration requis'
+          error: 'Unauthorized',
+          message: 'Admin token required'
         });
         return;
       }
@@ -276,16 +295,18 @@ export class ZoneController {
       const result = await this.syncService.performCleanup();
       
       res.json({
-        message: 'Nettoyage effectué',
+        message: 'Cleanup performed',
         timestamp: new Date().toISOString(),
         data: result
       });
       
     } catch (error) {
-      logger.error('Erreur performCleanup:', error);
+      logger.error('Failed to perform cleanup', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
       res.status(500).json({ 
-        error: 'Erreur serveur',
-        message: 'Impossible d\'effectuer le nettoyage'
+        error: 'Server error',
+        message: 'Unable to perform cleanup'
       });
     }
   }
@@ -294,11 +315,11 @@ export class ZoneController {
     const token = authHeader.replace('Bearer ', '');
     const validToken = process.env.ADMIN_TOKEN;
     
-    // Correction: s'assurer que validToken n'est pas undefined
     if (!validToken) {
       return false;
     }
     
-    return token === validToken;
+    return SecurityUtils.timingSafeEqual(token, validToken);
   }
 }
+export default ZoneController;

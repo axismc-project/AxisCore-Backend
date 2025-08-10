@@ -25,6 +25,7 @@
     "uuid": "^9.0.0",
     "zod": "^3.22.2",
     "winston": "^3.11.0",
+    "winston-loki": "^6.0.8",
     "dotenv": "^16.3.1"
   },
   "devDependencies": {
@@ -37,11 +38,10 @@
     "@types/jest": "^29.5.5",
     "tsx": "^3.12.7",
     "typescript": "^5.1.6",
-    "eslint": "^8.51.0",
-    "@typescript-eslint/eslint-plugin": "^6.7.4",
-    "@typescript-eslint/parser": "^6.7.4",
-    "typescript-eslint": "^6.7.4",
-    "@eslint/js": "^8.51.0",
+    "eslint": "^8.57.0",
+    "@typescript-eslint/eslint-plugin": "^6.21.0",
+    "@typescript-eslint/parser": "^6.21.0",
+    "@eslint/js": "^8.57.0",
     "jest": "^29.7.0",
     "ts-jest": "^29.1.1",
     "rimraf": "^5.0.5"

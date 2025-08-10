@@ -19,10 +19,11 @@ import { ZoneWebSocketServer } from './websocket/ZoneWebSocketServer';
 
 // Utils
 import { logger } from './utils/logger';
+import { SecurityUtils } from './utils/security';
 import { RedisConfig } from './config/redis';
 import { DatabaseConfig } from './config/database';
 
-// Charger variables d'environnement
+// Load environment variables
 dotenv.config();
 
 class Application {
@@ -40,7 +41,7 @@ class Application {
   private zoneController!: ZoneController;
   private playerController!: PlayerController;
 
-  // État de l'application
+  // Application state
   private isShuttingDown = false;
 
   constructor() {
@@ -62,9 +63,11 @@ class Application {
         this.redisService,
         this.calculatorService
       );
-      logger.info('✅ Services initialisés');
+      logger.info('Services initialized successfully');
     } catch (error) {
-      logger.error('❌ Erreur initialisation services:', error);
+      logger.error('Failed to initialize services', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
       throw error;
     }
   }
@@ -81,20 +84,22 @@ class Application {
         this.redisService,
         this.dbService
       );
-      logger.info('✅ Controllers initialisés');
+      logger.info('Controllers initialized successfully');
     } catch (error) {
-      logger.error('❌ Erreur initialisation controllers:', error);
+      logger.error('Failed to initialize controllers', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
       throw error;
     }
   }
 
   private setupMiddleware(): void {
-    // Vérifier si l'app est en cours d'arrêt
+    // Check if app is shutting down
     this.app.use((req, res, next) => {
       if (this.isShuttingDown) {
         res.status(503).json({
-          error: 'Service indisponible',
-          message: 'Application en cours d\'arrêt',
+          error: 'Service unavailable',
+          message: 'Application is shutting down',
           timestamp: new Date().toISOString()
         });
         return;
@@ -102,9 +107,9 @@ class Application {
       next();
     });
 
-    // Sécurité
+    // Security
     this.app.use(helmet({
-      contentSecurityPolicy: false, // Désactivé pour WebSocket
+      contentSecurityPolicy: false, // Disabled for WebSocket
       crossOriginEmbedderPolicy: false
     }));
     
@@ -116,7 +121,7 @@ class Application {
       allowedHeaders: ['Content-Type', 'Authorization']
     }));
     
-    // Parsing avec limites
+    // Parsing with limits
     this.app.use(express.json({ 
       limit: '10mb',
       strict: true,
@@ -127,21 +132,28 @@ class Application {
       limit: '10mb'
     }));
     
-    // Logging des requêtes avec plus de détails
+    // Request logging with more details
     this.app.use((req, res, next) => {
       const start = Date.now();
       const originalSend = res.send;
       
       res.send = function(data) {
         const duration = Date.now() - start;
-        logger.info(`${req.method} ${req.path} - ${res.statusCode} - ${duration}ms - ${req.ip}`);
+        logger.info('HTTP request', {
+          method: req.method,
+          path: req.path,
+          statusCode: res.statusCode,
+          durationMs: duration,
+          ip: req.ip,
+          userAgent: req.get('User-Agent')
+        });
         return originalSend.call(this, data);
       };
       
       next();
     });
 
-    // Headers de sécurité supplémentaires
+    // Additional security headers
     this.app.use((req, res, next) => {
       res.setHeader('X-Content-Type-Options', 'nosniff');
       res.setHeader('X-Frame-Options', 'DENY');
@@ -151,7 +163,7 @@ class Application {
   }
 
   private setupRoutes(): void {
-    // Route racine avec plus d'informations
+    // Root route with more information
     this.app.get('/', (req, res) => {
       res.json({
         name: 'Minecraft Zones Backend',
@@ -169,12 +181,29 @@ class Application {
       });
     });
 
-    // Routes API zones avec validation
+    // Zone API routes with validation
     this.app.get('/api/chunk/:chunkX/:chunkZ', 
       this.validateChunkParams.bind(this),
       this.zoneController.getChunkZone.bind(this.zoneController)
     );
     
+    // Dans setupRoutes(), ajouter ces routes :
+
+// Player creation
+this.app.post('/api/player/create',
+  this.playerController.createPlayer.bind(this.playerController)
+);
+
+// Zone creation and editing
+this.app.post('/api/zone/:zoneType/create',
+  this.validateAdminAuth.bind(this),
+  this.zoneController.createZone.bind(this.zoneController)
+);
+
+this.app.post('/api/zone/:zoneType/:zoneId/add-point',
+  this.validateAdminAuth.bind(this),
+  this.zoneController.addZonePoint.bind(this.zoneController)
+);
     this.app.get('/api/zones/hierarchy', 
       this.zoneController.getZoneHierarchy.bind(this.zoneController)
     );
@@ -189,7 +218,7 @@ class Application {
       this.zoneController.getPlayersInZone.bind(this.zoneController)
     );
 
-    // Routes API joueurs avec validation
+    // Player API routes with validation
     this.app.get('/api/player/:uuid', 
       this.validateUUIDParam.bind(this),
       this.playerController.getPlayerInfo.bind(this.playerController)
@@ -200,13 +229,20 @@ class Application {
       this.validatePositionBody.bind(this),
       this.playerController.updatePlayerPosition.bind(this.playerController)
     );
+
+    // NEW: Separate chunk update endpoint
+    this.app.post('/api/player/:uuid/chunk', 
+      this.validateUUIDParam.bind(this),
+      this.validateChunkBody.bind(this),
+      this.playerController.updatePlayerChunk.bind(this.playerController)
+    );
     
     this.app.get('/api/player/:uuid/zones', 
       this.validateUUIDParam.bind(this),
       this.playerController.getPlayerCurrentZones.bind(this.playerController)
     );
 
-    // Routes statistiques et monitoring
+    // Statistics and monitoring routes
     this.app.get('/api/stats', 
       this.zoneController.getStats.bind(this.zoneController)
     );
@@ -215,10 +251,20 @@ class Application {
       this.zoneController.getHealth.bind(this.zoneController)
     );
 
-    // Route de diagnostic système
+    // NEW: Batch service routes
+    this.app.get('/api/batch/stats',
+      this.playerController.getBatchStats.bind(this.playerController)
+    );
+
+    this.app.post('/api/batch/flush',
+      this.validateAdminAuth.bind(this),
+      this.playerController.forceFlushBatch.bind(this.playerController)
+    );
+
+    // System diagnostic route
     this.app.get('/api/system', this.getSystemInfo.bind(this));
 
-    // Routes administration avec authentification
+    // Admin routes with authentication
     this.app.post('/api/admin/sync', 
       this.validateAdminAuth.bind(this),
       this.zoneController.forceSync.bind(this.zoneController)
@@ -229,11 +275,11 @@ class Application {
       this.zoneController.performCleanup.bind(this.zoneController)
     );
 
-    // Route 404 avec plus de détails
+    // 404 route with more details
     this.app.use('*', (req, res) => {
       res.status(404).json({
-        error: 'Endpoint non trouvé',
-        message: `${req.method} ${req.originalUrl} n'existe pas`,
+        error: 'Endpoint not found',
+        message: `${req.method} ${req.originalUrl} does not exist`,
         timestamp: new Date().toISOString(),
         availableEndpoints: [
           'GET /',
@@ -242,38 +288,27 @@ class Application {
           'GET /api/zone/:type/:id',
           'GET /api/player/:uuid',
           'POST /api/player/:uuid/position',
+          'POST /api/player/:uuid/chunk',
           'GET /api/stats',
-          'GET /api/health'
+          'GET /api/health',
+          'GET /api/batch/stats'
         ]
       });
     });
   }
 
-  // ========== MIDDLEWARES DE VALIDATION ==========
+  // ========== VALIDATION MIDDLEWARES ==========
   private validateChunkParams(req: express.Request, res: express.Response, next: express.NextFunction): void {
     const { chunkX, chunkZ } = req.params;
     
     const x = parseInt(chunkX);
     const z = parseInt(chunkZ);
     
-    if (isNaN(x) || isNaN(z)) {
+    if (!SecurityUtils.isValidChunkCoordinate(x) || !SecurityUtils.isValidChunkCoordinate(z)) {
       res.status(400).json({
-        error: 'Paramètres invalides',
-        message: 'chunkX et chunkZ doivent être des entiers',
+        error: 'Invalid chunk coordinates',
+        message: 'chunkX and chunkZ must be valid integers within bounds',
         received: { chunkX, chunkZ }
-      });
-      return;
-    }
-    
-    const minChunk = parseInt(process.env.CHUNK_MIN || '-2000');
-    const maxChunk = parseInt(process.env.CHUNK_MAX || '2000');
-    
-    if (x < minChunk || x > maxChunk || z < minChunk || z > maxChunk) {
-      res.status(400).json({
-        error: 'Coordonnées hors limites',
-        message: `Les chunks doivent être entre ${minChunk} et ${maxChunk}`,
-        received: { x, z },
-        limits: { min: minChunk, max: maxChunk }
       });
       return;
     }
@@ -286,8 +321,8 @@ class Application {
     
     if (!['region', 'node', 'city'].includes(zoneType)) {
       res.status(400).json({
-        error: 'Type de zone invalide',
-        message: 'Le type doit être: region, node, ou city',
+        error: 'Invalid zone type',
+        message: 'Type must be: region, node, or city',
         received: zoneType,
         allowed: ['region', 'node', 'city']
       });
@@ -297,8 +332,8 @@ class Application {
     const id = parseInt(zoneId);
     if (isNaN(id) || id <= 0) {
       res.status(400).json({
-        error: 'ID de zone invalide',
-        message: 'L\'ID doit être un entier positif',
+        error: 'Invalid zone ID',
+        message: 'ID must be a positive integer',
         received: zoneId
       });
       return;
@@ -310,11 +345,10 @@ class Application {
   private validateUUIDParam(req: express.Request, res: express.Response, next: express.NextFunction): void {
     const { uuid } = req.params;
     
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-    if (!uuid || !uuidRegex.test(uuid)) {
+    if (!SecurityUtils.isValidUUID(uuid)) {
       res.status(400).json({
-        error: 'UUID invalide',
-        message: 'L\'UUID doit être au format valide (ex: 123e4567-e89b-12d3-a456-426614174000)',
+        error: 'Invalid UUID',
+        message: 'UUID must be in valid format (e.g. 123e4567-e89b-12d3-a456-426614174000)',
         received: uuid
       });
       return;
@@ -328,27 +362,34 @@ class Application {
     
     if (!name || typeof name !== 'string' || name.length === 0 || name.length > 16) {
       res.status(400).json({
-        error: 'Nom invalide',
-        message: 'Le nom doit être une chaîne de 1 à 16 caractères',
+        error: 'Invalid name',
+        message: 'Name must be a string with 1 to 16 characters',
         received: { name, type: typeof name, length: name?.length }
       });
       return;
     }
     
-    if (typeof x !== 'number' || typeof y !== 'number' || typeof z !== 'number') {
+    if (!SecurityUtils.isValidCoordinate(x) || !SecurityUtils.isValidCoordinate(y) || !SecurityUtils.isValidCoordinate(z)) {
       res.status(400).json({
-        error: 'Coordonnées invalides',
-        message: 'x, y, z doivent être des nombres',
-        received: { x: typeof x, y: typeof y, z: typeof z }
+        error: 'Invalid coordinates',
+        message: 'x, y, z must be valid finite numbers within bounds',
+        received: { x, y, z }
       });
       return;
     }
     
-    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+    next();
+  }
+
+  // NEW: Validation for chunk-only updates
+  private validateChunkBody(req: express.Request, res: express.Response, next: express.NextFunction): void {
+    const { chunkX, chunkZ } = req.body;
+    
+    if (!SecurityUtils.isValidChunkCoordinate(chunkX) || !SecurityUtils.isValidChunkCoordinate(chunkZ)) {
       res.status(400).json({
-        error: 'Coordonnées invalides',
-        message: 'x, y, z doivent être des nombres finis',
-        received: { x, y, z }
+        error: 'Invalid chunk coordinates',
+        message: 'chunkX and chunkZ must be valid integers within bounds',
+        received: { chunkX, chunkZ }
       });
       return;
     }
@@ -362,25 +403,25 @@ class Application {
     
     if (!validToken) {
       res.status(500).json({
-        error: 'Configuration manquante',
-        message: 'Token d\'administration non configuré'
+        error: 'Configuration missing',
+        message: 'Admin token not configured'
       });
       return;
     }
     
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       res.status(401).json({
-        error: 'Authentification requise',
-        message: 'Header Authorization avec Bearer token requis'
+        error: 'Authentication required',
+        message: 'Authorization header with Bearer token required'
       });
       return;
     }
     
     const token = authHeader.replace('Bearer ', '');
-    if (token !== validToken) {
+    if (!SecurityUtils.timingSafeEqual(token, validToken)) {
       res.status(403).json({
-        error: 'Token invalide',
-        message: 'Token d\'administration incorrect'
+        error: 'Invalid token',
+        message: 'Invalid admin token'
       });
       return;
     }
@@ -388,12 +429,17 @@ class Application {
     next();
   }
 
-  // ========== ROUTE SYSTÈME ==========
+  // ========== SYSTEM ROUTE ==========
   private async getSystemInfo(req: express.Request, res: express.Response): Promise<void> {
     try {
       const [dbStats, redisStats] = await Promise.all([
         DatabaseConfig.getPoolStats(),
-        this.redisService.getStats().catch(() => ({ connectionStatus: 'error', activePlayers: 0, cachedChunks: 0, memoryUsage: 'Unknown' }))
+        this.redisService.getStats().catch(() => ({ 
+          connectionStatus: 'error', 
+          activePlayers: 0, 
+          cachedChunks: 0, 
+          memoryUsage: 'Unknown' 
+        }))
       ]);
 
       res.json({
@@ -421,21 +467,23 @@ class Application {
         }
       });
     } catch (error) {
-      logger.error('Erreur getSystemInfo:', error);
+      logger.error('Failed to get system info', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
       res.status(500).json({
-        error: 'Erreur récupération informations système',
-        message: error instanceof Error ? error.message : 'Erreur inconnue'
+        error: 'Failed to get system information',
+        message: error instanceof Error ? error.message : 'Unknown error'
       });
     }
   }
 
   private setupErrorHandling(): void {
-    // Gestionnaire d'erreurs global avec plus de détails
+    // Global error handler with more details
     this.app.use((error: Error, req: express.Request, res: express.Response, next: express.NextFunction) => {
       const errorId = Date.now().toString(36) + Math.random().toString(36).substr(2);
       
-      logger.error(`Erreur non gérée [${errorId}]:`, {
-        error: error.message,
+      logger.error('Unhandled error', {
+error: error.message,
         stack: error.stack,
         url: req.url,
         method: req.method,
@@ -446,36 +494,36 @@ class Application {
       const isDevelopment = process.env.NODE_ENV === 'development';
       
       res.status(500).json({
-        error: 'Erreur serveur interne',
-        message: isDevelopment ? error.message : 'Une erreur est survenue',
+        error: 'Internal server error',
+        message: isDevelopment ? error.message : 'An error occurred',
         errorId,
         timestamp: new Date().toISOString(),
         ...(isDevelopment && { stack: error.stack })
       });
     });
 
-    // Gestionnaire promesses rejetées avec plus de contexte
+    // Handle unhandled promise rejections with more context
     process.on('unhandledRejection', (reason, promise) => {
-      logger.error('Promesse rejetée non gérée:', {
+      logger.error('Unhandled promise rejection', {
         reason,
         promise: promise.toString()
       });
     });
 
-    // Gestionnaire exceptions non capturées
+    // Handle uncaught exceptions
     process.on('uncaughtException', (error) => {
-      logger.error('Exception non capturée:', {
+      logger.error('Uncaught exception', {
         error: error.message,
         stack: error.stack
       });
       
-      // Arrêt gracieux
+      // Graceful shutdown
       this.gracefulShutdown('UNCAUGHT_EXCEPTION');
     });
 
-    // Gestionnaire warnings
+    // Handle warnings
     process.on('warning', (warning) => {
-      logger.warn('Node.js warning:', {
+      logger.warn('Node.js warning', {
         name: warning.name,
         message: warning.message,
         stack: warning.stack
@@ -487,34 +535,34 @@ class Application {
     try {
       const port = process.env.PORT || 3000;
       
-      logger.info('🚀 Démarrage de l\'application...');
+      logger.info('Starting application');
       
-      // 1. Vérifier les variables d'environnement critiques
+      // 1. Validate critical environment variables
       this.validateEnvironment();
       
-      // 2. Initialiser Redis
+      // 2. Initialize Redis
       await this.redisService.init();
-      logger.info('✅ Redis initialisé');
+      logger.info('Redis initialized successfully');
       
-      // 3. Tester la connexion PostgreSQL
+      // 3. Test PostgreSQL connection
       const dbConnected = await DatabaseConfig.testConnection();
       if (!dbConnected) {
-        throw new Error('Impossible de se connecter à PostgreSQL');
+        throw new Error('Unable to connect to PostgreSQL');
       }
-      logger.info('✅ PostgreSQL connecté');
+      logger.info('PostgreSQL connected successfully');
       
-      // 4. Initialiser le service de synchronisation
+      // 4. Initialize synchronization service
       await this.syncService.init();
-      logger.info('✅ Service de synchronisation initialisé');
+      logger.info('Synchronization service initialized successfully');
       
-      // 5. Démarrer le serveur HTTP
+      // 5. Start HTTP server
       this.server = createServer(this.app);
       
-      // 6. Initialiser WebSocket
+      // 6. Initialize WebSocket
       this.wsServer = new ZoneWebSocketServer(this.server, this.redisService);
-      logger.info('✅ Serveur WebSocket initialisé');
+      logger.info('WebSocket server initialized successfully');
       
-      // 7. Démarrer l'écoute
+      // 7. Start listening
       await new Promise<void>((resolve, reject) => {
         this.server.listen(port, (err?: Error) => {
           if (err) {
@@ -525,15 +573,17 @@ class Application {
         });
       });
       
-      logger.info(`🌐 Serveur démarré sur port ${port}`);
-      logger.info(`📡 WebSocket disponible sur ws://localhost:${port}/ws/zones`);
-      logger.info(`🔗 API disponible sur http://localhost:${port}/api`);
+      logger.info('Server started successfully', { port });
+      logger.info('WebSocket available', { endpoint: `ws://localhost:${port}/ws/zones` });
+      logger.info('API available', { endpoint: `http://localhost:${port}/api` });
       
-      // 8. Gérer l'arrêt propre
+      // 8. Setup graceful shutdown
       this.setupGracefulShutdown();
       
     } catch (error) {
-      logger.error('❌ Erreur démarrage application:', error);
+      logger.error('Failed to start application', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
       await this.cleanup();
       process.exit(1);
     }
@@ -544,10 +594,10 @@ class Application {
     const missing = required.filter(key => !process.env[key]);
     
     if (missing.length > 0) {
-      throw new Error(`Variables d'environnement manquantes: ${missing.join(', ')}`);
+      throw new Error(`Missing environment variables: ${missing.join(', ')}`);
     }
     
-    logger.info('✅ Variables d\'environnement validées');
+    logger.info('Environment variables validated successfully');
   }
 
   private setupGracefulShutdown(): void {
@@ -560,28 +610,30 @@ class Application {
 
   private async gracefulShutdown(signal: string): Promise<void> {
     if (this.isShuttingDown) {
-      logger.warn(`Signal ${signal} ignoré - arrêt déjà en cours`);
+      logger.warn('Shutdown signal ignored - already shutting down', { signal });
       return;
     }
     
     this.isShuttingDown = true;
-    logger.info(`🛑 Signal ${signal} reçu, arrêt en cours...`);
+    logger.info('Graceful shutdown initiated', { signal });
     
     try {
-      // Arrêter d'accepter de nouvelles connexions
+      // Stop accepting new connections
       if (this.server) {
         this.server.close();
       }
       
-      // Attendre que les requêtes en cours se terminent (max 10s)
+      // Wait for ongoing requests to complete (max 2s)
       await new Promise(resolve => setTimeout(resolve, 2000));
       
       await this.cleanup();
       
-      logger.info('✅ Arrêt propre terminé');
+      logger.info('Graceful shutdown completed successfully');
       process.exit(0);
     } catch (error) {
-      logger.error('❌ Erreur lors de l\'arrêt:', error);
+      logger.error('Error during shutdown', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
       process.exit(1);
     }
   }
@@ -589,7 +641,7 @@ class Application {
   private async cleanup(): Promise<void> {
     const cleanupPromises: Promise<void>[] = [];
     
-    // Fermer WebSocket
+    // Close WebSocket
     if (this.wsServer) {
       cleanupPromises.push(
         new Promise(resolve => {
@@ -599,27 +651,32 @@ class Application {
       );
     }
     
-    // Arrêter le service de synchronisation
+    // Stop synchronization service
     if (this.syncService) {
       cleanupPromises.push(this.syncService.destroy());
     }
+
+    // Stop player controller (batch service)
+    if (this.playerController) {
+      cleanupPromises.push(this.playerController.destroy());
+    }
     
-    // Fermer Redis
+    // Close Redis
     if (this.redisService) {
       cleanupPromises.push(this.redisService.destroy());
     }
     
-    // Fermer pool PostgreSQL
+    // Close PostgreSQL pool
     cleanupPromises.push(DatabaseConfig.closeAll());
     
-    // Attendre tous les nettoyages (max 5s)
+    // Wait for all cleanups (max 5s)
     await Promise.race([
       Promise.allSettled(cleanupPromises),
       new Promise(resolve => setTimeout(resolve, 5000))
     ]);
   }
 
-  // ========== API PUBLIQUE POUR TESTS ==========
+  // ========== PUBLIC API FOR TESTS ==========
   getApp(): express.Application {
     return this.app;
   }
@@ -633,15 +690,18 @@ class Application {
   }
 }
 
-// Démarrage de l'application
+// Start application
 const app = new Application();
 
-// Démarrer seulement si ce n'est pas un import (pour les tests)
+// Start only if this is not an import (for tests)
 if (require.main === module) {
   app.start().catch(error => {
-    logger.error('Erreur fatale:', error);
+    logger.error('Fatal error', { 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
     process.exit(1);
   });
 }
+
 
 export default Application;

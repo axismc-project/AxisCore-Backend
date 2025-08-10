@@ -2,6 +2,7 @@ import { RedisClientType } from 'redis';
 import { RedisConfig } from '../config/redis';
 import { ChunkZoneData, ZoneEvent } from '../models/Zone';
 import { PlayerPosition, PlayerZones } from '../models/Player';
+import { SecurityUtils } from '../utils/security';
 import { logger } from '../utils/logger';
 
 export class RedisService {
@@ -14,30 +15,36 @@ export class RedisService {
       this.client = await RedisConfig.getClient();
       this.publisher = await RedisConfig.getPublisher();
       this.subscriber = await RedisConfig.getSubscriber();
-      logger.info('RedisService initialisé');
+      logger.info('Redis service initialized successfully');
     } catch (error) {
-      logger.error('Erreur initialisation RedisService:', error);
+      logger.error('Failed to initialize Redis service', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
       throw error;
     }
   }
 
   private getClient(): RedisClientType {
-    if (!this.client) throw new Error('Redis client non initialisé');
+    if (!this.client) throw new Error('Redis client not initialized');
     return this.client;
   }
 
   private getPublisher(): RedisClientType {
-    if (!this.publisher) throw new Error('Redis publisher non initialisé');
+    if (!this.publisher) throw new Error('Redis publisher not initialized');
     return this.publisher;
   }
 
   private getSubscriber(): RedisClientType {
-    if (!this.subscriber) throw new Error('Redis subscriber non initialisé');
+    if (!this.subscriber) throw new Error('Redis subscriber not initialized');
     return this.subscriber;
   }
 
   // ========== GESTION CHUNKS ==========
   async setChunkZone(chunkX: number, chunkZ: number, zoneData: ChunkZoneData): Promise<void> {
+    if (!SecurityUtils.isValidChunkCoordinate(chunkX) || !SecurityUtils.isValidChunkCoordinate(chunkZ)) {
+      throw new Error('Invalid chunk coordinates');
+    }
+
     const key = `chunk:zone:${chunkX}:${chunkZ}`;
     const client = this.getClient();
     
@@ -54,8 +61,12 @@ export class RedisService {
       await client.hSet(key, data);
       await client.expire(key, parseInt(process.env.CACHE_TTL_CHUNKS || '86400'));
     } catch (error) {
-      logger.error(`Erreur setChunkZone ${chunkX},${chunkZ}:`, error);
-      throw new Error('Impossible de sauvegarder la zone du chunk');
+      logger.error('Failed to set chunk zone', { 
+        chunkX, 
+        chunkZ, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to save chunk zone');
     }
   }
 
@@ -79,8 +90,12 @@ export class RedisService {
         cityName: data.city_name && data.city_name !== '' ? data.city_name : null
       };
     } catch (error) {
-      logger.error(`Erreur getChunkZone ${chunkX},${chunkZ}:`, error);
-      throw new Error('Impossible de récupérer la zone du chunk');
+      logger.error('Failed to get chunk zone', { 
+        chunkX, 
+        chunkZ, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to fetch chunk zone');
     }
   }
 
@@ -91,19 +106,27 @@ export class RedisService {
     try {
       await client.del(key);
     } catch (error) {
-      logger.error(`Erreur deleteChunkZone ${chunkX},${chunkZ}:`, error);
-      throw new Error('Impossible de supprimer la zone du chunk');
+      logger.error('Failed to delete chunk zone', { 
+        chunkX, 
+        chunkZ, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to delete chunk zone');
     }
   }
 
   async deleteChunkZonesByPattern(pattern: string): Promise<number> {
+    if (!SecurityUtils.isValidRedisPattern(pattern)) {
+      throw new Error('Invalid Redis pattern');
+    }
+
     const client = this.getClient();
     
     try {
       const keys = await client.keys(pattern);
       if (keys.length === 0) return 0;
       
-      // Traiter par batch pour éviter de surcharger Redis
+      // Process in batches to avoid overloading Redis
       const batchSize = 1000;
       let deletedCount = 0;
       
@@ -113,15 +136,23 @@ export class RedisService {
         deletedCount += batch.length;
       }
       
+      logger.info('Chunk zones deleted by pattern', { pattern, deletedCount });
       return deletedCount;
     } catch (error) {
-      logger.error(`Erreur deleteChunkZonesByPattern ${pattern}:`, error);
-      throw new Error('Impossible de supprimer les zones par pattern');
+      logger.error('Failed to delete chunk zones by pattern', { 
+        pattern, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to delete zones by pattern');
     }
   }
 
   // ========== POSITIONS JOUEURS ==========
   async setPlayerPosition(uuid: string, position: PlayerPosition): Promise<void> {
+    if (!SecurityUtils.isValidUUID(uuid)) {
+      throw new Error('Invalid player UUID');
+    }
+
     const key = `player:pos:${uuid}`;
     const client = this.getClient();
     
@@ -138,8 +169,43 @@ export class RedisService {
       await client.hSet(key, data);
       await client.expire(key, parseInt(process.env.CACHE_TTL_CHUNKS || '86400'));
     } catch (error) {
-      logger.error(`Erreur setPlayerPosition ${uuid}:`, error);
-      throw new Error('Impossible de sauvegarder la position du joueur');
+      logger.error('Failed to set player position', { 
+        uuid, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to save player position');
+    }
+  }
+
+  async setPlayerChunk(uuid: string, chunkX: number, chunkZ: number): Promise<void> {
+    if (!SecurityUtils.isValidUUID(uuid)) {
+      throw new Error('Invalid player UUID');
+    }
+
+    if (!SecurityUtils.isValidChunkCoordinate(chunkX) || !SecurityUtils.isValidChunkCoordinate(chunkZ)) {
+      throw new Error('Invalid chunk coordinates');
+    }
+
+    const key = `player:chunk:${uuid}`;
+    const client = this.getClient();
+    
+    try {
+      const data: Record<string, string> = {
+        chunk_x: chunkX.toString(),
+        chunk_z: chunkZ.toString(),
+        timestamp: Date.now().toString()
+      };
+
+      await client.hSet(key, data);
+      await client.expire(key, parseInt(process.env.CACHE_TTL_CHUNKS || '86400'));
+    } catch (error) {
+      logger.error('Failed to set player chunk', { 
+        uuid, 
+        chunkX, 
+        chunkZ, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to save player chunk');
     }
   }
 
@@ -174,8 +240,44 @@ export class RedisService {
         timestamp: parseInt(timestamp)
       };
     } catch (error) {
-      logger.error(`Erreur getPlayerPosition ${uuid}:`, error);
-      throw new Error('Impossible de récupérer la position du joueur');
+      logger.error('Failed to get player position', { 
+        uuid, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to fetch player position');
+    }
+  }
+
+  async getPlayerChunk(uuid: string): Promise<{ chunk_x: number; chunk_z: number; timestamp: number } | null> {
+    const key = `player:chunk:${uuid}`;
+    const client = this.getClient();
+    
+    try {
+      const data = await client.hGetAll(key);
+      
+      if (Object.keys(data).length === 0) {
+        return null;
+      }
+
+      const chunkX = data.chunk_x;
+      const chunkZ = data.chunk_z;
+      const timestamp = data.timestamp;
+
+      if (!chunkX || !chunkZ || !timestamp) {
+        return null;
+      }
+      
+      return {
+        chunk_x: parseInt(chunkX),
+        chunk_z: parseInt(chunkZ),
+        timestamp: parseInt(timestamp)
+      };
+    } catch (error) {
+      logger.error('Failed to get player chunk', { 
+        uuid, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to fetch player chunk');
     }
   }
 
@@ -195,8 +297,11 @@ export class RedisService {
       await client.hSet(key, data);
       await client.expire(key, parseInt(process.env.CACHE_TTL_CHUNKS || '86400'));
     } catch (error) {
-      logger.error(`Erreur setPlayerZones ${uuid}:`, error);
-      throw new Error('Impossible de sauvegarder les zones du joueur');
+      logger.error('Failed to set player zones', { 
+        uuid, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to save player zones');
     }
   }
 
@@ -223,8 +328,11 @@ export class RedisService {
         last_update: parseInt(lastUpdate)
       };
     } catch (error) {
-      logger.error(`Erreur getPlayerZones ${uuid}:`, error);
-      throw new Error('Impossible de récupérer les zones du joueur');
+      logger.error('Failed to get player zones', { 
+        uuid, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to fetch player zones');
     }
   }
 
@@ -237,8 +345,13 @@ export class RedisService {
       await client.sAdd(key, uuid);
       await client.expire(key, parseInt(process.env.CACHE_TTL_ZONES || '3600'));
     } catch (error) {
-      logger.error(`Erreur addPlayerToZone ${zoneType}:${zoneId}:`, error);
-      throw new Error('Impossible d\'ajouter le joueur à la zone');
+      logger.error('Failed to add player to zone', { 
+        zoneType, 
+        zoneId, 
+        uuid, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to add player to zone');
     }
   }
 
@@ -249,8 +362,13 @@ export class RedisService {
     try {
       await client.sRem(key, uuid);
     } catch (error) {
-      logger.error(`Erreur removePlayerFromZone ${zoneType}:${zoneId}:`, error);
-      throw new Error('Impossible de retirer le joueur de la zone');
+      logger.error('Failed to remove player from zone', { 
+        zoneType, 
+        zoneId, 
+        uuid, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to remove player from zone');
     }
   }
 
@@ -261,8 +379,12 @@ export class RedisService {
     try {
       return await client.sMembers(key);
     } catch (error) {
-      logger.error(`Erreur getPlayersInZone ${zoneType}:${zoneId}:`, error);
-      throw new Error('Impossible de récupérer les joueurs de la zone');
+      logger.error('Failed to get players in zone', { 
+        zoneType, 
+        zoneId, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to fetch players in zone');
     }
   }
 
@@ -280,8 +402,12 @@ export class RedisService {
       await client.hSet(key, stringData);
       await client.expire(key, parseInt(process.env.CACHE_TTL_ZONES || '3600'));
     } catch (error) {
-      logger.error(`Erreur cacheZoneMetadata ${zoneType}:${id}:`, error);
-      throw new Error('Impossible de mettre en cache les métadonnées de la zone');
+      logger.error('Failed to cache zone metadata', { 
+        zoneType, 
+        id, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to cache zone metadata');
     }
   }
 
@@ -293,8 +419,12 @@ export class RedisService {
       const data = await client.hGetAll(key);
       return Object.keys(data).length > 0 ? data : null;
     } catch (error) {
-      logger.error(`Erreur getZoneMetadata ${zoneType}:${id}:`, error);
-      throw new Error('Impossible de récupérer les métadonnées de la zone');
+      logger.error('Failed to get zone metadata', { 
+        zoneType, 
+        id, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to fetch zone metadata');
     }
   }
 
@@ -309,8 +439,12 @@ export class RedisService {
       
       await client.del(keys);
     } catch (error) {
-      logger.error(`Erreur invalidateZoneCache ${zoneType}:${id}:`, error);
-      throw new Error('Impossible d\'invalider le cache de la zone');
+      logger.error('Failed to invalidate zone cache', { 
+        zoneType, 
+        id, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to invalidate zone cache');
     }
   }
 
@@ -323,8 +457,11 @@ export class RedisService {
       await publisher.publish(channel, JSON.stringify(event));
       await this.addEventToStream(event);
     } catch (error) {
-      logger.error('Erreur publishZoneEvent:', error);
-      throw new Error('Impossible de publier l\'événement de zone');
+      logger.error('Failed to publish zone event', { 
+        event, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to publish zone event');
     }
   }
 
@@ -341,14 +478,16 @@ export class RedisService {
       for (const channel of channels) {
         await subscriber.subscribe(channel, callback);
       }
-      logger.info(`Abonné aux ${channels.length} canaux de zones`);
+      logger.info('Subscribed to zone events', { channelCount: channels.length });
     } catch (error) {
-      logger.error('Erreur subscribeToZoneEvents:', error);
-      throw new Error('Impossible de s\'abonner aux événements de zones');
+      logger.error('Failed to subscribe to zone events', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to subscribe to zone events');
     }
   }
 
- private async addEventToStream(event: ZoneEvent): Promise<void> {
+  private async addEventToStream(event: ZoneEvent): Promise<void> {
     const client = this.getClient();
     
     try {
@@ -361,13 +500,81 @@ export class RedisService {
         timestamp: event.timestamp.toString()
       });
 
-      // Correction: utiliser la syntaxe correcte pour xTrim
       await client.xTrim('events:zone', 'MAXLEN', 10000, {
         strategyModifier: '~'
       });
     } catch (error) {
-      logger.error('Erreur addEventToStream:', error);
-      // Ne pas faire échouer la publication pour une erreur de stream
+      logger.error('Failed to add event to stream', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      // Don't throw - stream failure shouldn't break event publishing
+    }
+  }
+
+  // ========== BIDIRECTIONAL SYNC ==========
+  async syncPlayersFromDatabase(players: Array<{
+    player_uuid: string;
+    x: number;
+    y: number;
+    z: number;
+    chunk_x: number;
+    chunk_z: number;
+    last_updated: Date;
+    region_id?: number;
+    node_id?: number;
+    city_id?: number;
+  }>): Promise<number> {
+    let syncedCount = 0;
+    const batchSize = 100;
+    
+    try {
+      for (let i = 0; i < players.length; i += batchSize) {
+        const batch = players.slice(i, i + batchSize);
+        const promises = batch.map(async (player) => {
+          try {
+            // Sync position
+            await this.setPlayerPosition(player.player_uuid, {
+              x: player.x,
+              y: player.y,
+              z: player.z,
+              chunk_x: player.chunk_x,
+              chunk_z: player.chunk_z,
+              timestamp: player.last_updated.getTime()
+            });
+
+            // Sync zones if they exist
+            if (player.region_id || player.node_id || player.city_id) {
+              await this.setPlayerZones(player.player_uuid, {
+                region_id: player.region_id,
+                node_id: player.node_id,
+                city_id: player.city_id,
+                last_update: player.last_updated.getTime()
+              });
+            }
+
+            syncedCount++;
+          } catch (error) {
+            logger.error('Failed to sync individual player', { 
+              playerUuid: player.player_uuid, 
+              error: error instanceof Error ? error.message : 'Unknown error' 
+            });
+          }
+        });
+
+        await Promise.allSettled(promises);
+      }
+
+      logger.info('Database to Redis sync completed', { 
+        totalPlayers: players.length, 
+        syncedCount 
+      });
+      
+      return syncedCount;
+    } catch (error) {
+      logger.error('Failed to sync players from database', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to sync players from database');
     }
   }
 
@@ -394,7 +601,9 @@ export class RedisService {
         connectionStatus: 'connected'
       };
     } catch (error) {
-      logger.error('Erreur getStats:', error);
+      logger.error('Failed to get Redis stats', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
       return {
         activePlayers: 0,
         cachedChunks: 0,
@@ -421,13 +630,13 @@ export class RedisService {
   }> {
     const client = this.getClient();
     const now = Date.now();
-    const maxAge = 24 * 60 * 60 * 1000; // 24 heures
+    const maxAge = 24 * 60 * 60 * 1000; // 24 hours
     
     let deletedPlayers = 0;
     let deletedZones = 0;
     
     try {
-      // Nettoyer les positions de joueurs expirées
+      // Clean expired player positions
       const playerKeys = await client.keys('player:pos:*');
       
       for (const key of playerKeys) {
@@ -438,11 +647,11 @@ export class RedisService {
             deletedPlayers++;
           }
         } catch (error) {
-          logger.debug(`Erreur nettoyage clé ${key}:`, error);
+          logger.debug('Error cleaning key', { key, error: error instanceof Error ? error.message : 'Unknown error' });
         }
       }
 
-      // Nettoyer les zones de joueurs expirées
+      // Clean expired player zones
       const zoneKeys = await client.keys('player:zones:*');
       
       for (const key of zoneKeys) {
@@ -453,19 +662,21 @@ export class RedisService {
             deletedZones++;
           }
         } catch (error) {
-          logger.debug(`Erreur nettoyage clé ${key}:`, error);
+          logger.debug('Error cleaning key', { key, error: error instanceof Error ? error.message : 'Unknown error' });
         }
       }
 
-      logger.info(`Nettoyage terminé: ${deletedPlayers} joueurs, ${deletedZones} zones supprimées`);
+      logger.info('Redis cleanup completed', { deletedPlayers, deletedZones });
       
       return {
         deletedPlayers,
         deletedChunks: deletedZones
       };
     } catch (error) {
-      logger.error('Erreur cleanupExpiredData:', error);
-      throw new Error('Impossible de nettoyer les données expirées');
+      logger.error('Failed to cleanup expired data', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to cleanup expired data');
     }
   }
 
@@ -476,14 +687,16 @@ export class RedisService {
       const result = await client.ping();
       return result === 'PONG';
     } catch (error) {
-      logger.error('Erreur ping Redis:', error);
+      logger.error('Redis ping failed', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
       return false;
     }
   }
 
   // ========== NETTOYAGE À LA FERMETURE ==========
   async destroy(): Promise<void> {
-    logger.info('🛑 Fermeture RedisService...');
+    logger.info('Shutting down Redis service');
     
     try {
       if (this.client) {
@@ -498,9 +711,11 @@ export class RedisService {
         await this.subscriber.quit();
         this.subscriber = null;
       }
-      logger.info('✅ RedisService fermé');
+      logger.info('Redis service shut down successfully');
     } catch (error) {
-      logger.error('Erreur fermeture RedisService:', error);
+      logger.error('Error shutting down Redis service', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
     }
   }
 }

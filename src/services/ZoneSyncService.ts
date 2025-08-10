@@ -19,23 +19,68 @@ export class ZoneSyncService {
   async init(): Promise<void> {
     if (this.isInitialized) return;
 
-    logger.info('🔄 Initialisation ZoneSyncService...');
+    logger.info('Initializing zone sync service');
     
     try {
-      // Synchronisation complète initiale
+      // Complete initial synchronization
       await this.fullSync();
       
-      // Démarrer l'écoute des changements
+      // Bidirectional sync: Database to Redis
+      await this.syncPlayersFromDatabase();
+      
+      // Start incremental sync listener
       await this.startIncrementalSync();
       
-      // Programmer le nettoyage automatique
+      // Schedule automatic cleanup
       this.scheduleCleanup();
       
       this.isInitialized = true;
-      logger.info('✅ ZoneSyncService initialisé avec succès');
+      logger.info('Zone sync service initialized successfully');
     } catch (error) {
-      logger.error('❌ Erreur initialisation ZoneSyncService:', error);
-      throw new Error('Impossible d\'initialiser le service de synchronisation');
+      logger.error('Failed to initialize zone sync service', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to initialize synchronization service');
+    }
+  }
+
+  // ========== BIDIRECTIONAL SYNC ==========
+  private async syncPlayersFromDatabase(): Promise<void> {
+    logger.info('Starting bidirectional sync: Database to Redis');
+    
+    try {
+      const players = await this.db.getAllOnlinePlayers();
+      
+      if (players.length === 0) {
+        logger.info('No online players to sync');
+        return;
+      }
+
+      // FIX: Convert null values to undefined for Redis sync
+      const playersForSync = players.map(player => ({
+        player_uuid: player.player_uuid,
+        x: player.x,
+        y: player.y,
+        z: player.z,
+        chunk_x: player.chunk_x,
+        chunk_z: player.chunk_z,
+        last_updated: player.last_updated,
+        region_id: player.region_id ?? undefined, // Convert null to undefined
+        node_id: player.node_id ?? undefined,     // Convert null to undefined
+        city_id: player.city_id ?? undefined      // Convert null to undefined
+      }));
+
+      const syncedCount = await this.redis.syncPlayersFromDatabase(playersForSync);
+      
+      logger.info('Database to Redis sync completed', { 
+        totalPlayers: players.length, 
+        syncedPlayers: syncedCount 
+      });
+    } catch (error) {
+      logger.error('Failed to sync players from database', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw error;
     }
   }
 
@@ -49,7 +94,7 @@ export class ZoneSyncService {
     errors: number;
   }> {
     if (this.syncInProgress) {
-      throw new Error('Une synchronisation est déjà en cours');
+      throw new Error('Synchronization already in progress');
     }
 
     this.syncInProgress = true;
@@ -58,32 +103,40 @@ export class ZoneSyncService {
     let errors = 0;
     
     try {
-      logger.info('🔄 Début synchronisation complète...');
+      logger.info('Starting full synchronization');
       
-      // 1. Charger toutes les zones depuis PostgreSQL
+      // 1. Load all zones from PostgreSQL
       const [regions, nodes, cities] = await Promise.all([
         this.db.getAllRegions(),
         this.db.getAllNodes(),
         this.db.getAllCities()
       ]);
 
-      logger.info(`📦 Chargé ${regions.length} régions, ${nodes.length} nodes, ${cities.length} villes`);
+      logger.info('Loaded zones from database', { 
+        regions: regions.length, 
+        nodes: nodes.length, 
+        cities: cities.length 
+      });
 
-      // 2. Valider les données
+      // 2. Validate zone data
       await this.validateZonesData(regions, nodes, cities);
 
-      // 3. Pré-calculer tous les chunks
+      // 3. Pre-compute all chunks
       const result = await this.precomputeAllChunks(regions, nodes, cities);
       chunksProcessed = result.chunksProcessed;
       errors = result.errors;
 
-      // 4. Mettre en cache les métadonnées des zones
+      // 4. Cache zone metadata
       await this.cacheZoneMetadata(regions, nodes, cities);
 
       const duration = Date.now() - startTime;
       this.lastSyncTime = new Date();
       
-      logger.info(`✅ Synchronisation terminée en ${duration}ms - ${chunksProcessed} chunks traités - ${errors} erreurs`);
+      logger.info('Full synchronization completed', { 
+        durationMs: duration, 
+        chunksProcessed, 
+        errors 
+      });
       
       return {
         duration,
@@ -94,7 +147,9 @@ export class ZoneSyncService {
         errors
       };
     } catch (error) {
-      logger.error('❌ Erreur synchronisation complète:', error);
+      logger.error('Full synchronization failed', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
       throw error;
     } finally {
       this.syncInProgress = false;
@@ -102,19 +157,19 @@ export class ZoneSyncService {
   }
 
   private async validateZonesData(regions: Region[], nodes: Node[], cities: City[]): Promise<void> {
-    logger.info('🔍 Validation des données de zones...');
+    logger.info('Validating zone data');
     
     const errors: string[] = [];
     
-    // Valider les polygones
+    // Validate polygons
     for (const region of regions) {
       try {
         const validation = this.calculator.validatePolygon(region.chunk_boundary);
         if (!validation.valid) {
-          errors.push(`Région ${region.name} invalide: ${validation.error}`);
+          errors.push(`Invalid region ${region.name}: ${validation.error}`);
         }
       } catch (error) {
-        errors.push(`Erreur validation région ${region.name}: ${error}`);
+        errors.push(`Region validation error ${region.name}: ${error}`);
       }
     }
 
@@ -122,10 +177,10 @@ export class ZoneSyncService {
       try {
         const validation = this.calculator.validatePolygon(node.chunk_boundary);
         if (!validation.valid) {
-          errors.push(`Node ${node.name} invalide: ${validation.error}`);
+          errors.push(`Invalid node ${node.name}: ${validation.error}`);
         }
       } catch (error) {
-        errors.push(`Erreur validation node ${node.name}: ${error}`);
+        errors.push(`Node validation error ${node.name}: ${error}`);
       }
     }
 
@@ -133,147 +188,158 @@ export class ZoneSyncService {
       try {
         const validation = this.calculator.validatePolygon(city.chunk_boundary);
         if (!validation.valid) {
-          errors.push(`Ville ${city.name} invalide: ${validation.error}`);
+          errors.push(`Invalid city ${city.name}: ${validation.error}`);
         }
       } catch (error) {
-        errors.push(`Erreur validation ville ${city.name}: ${error}`);
+        errors.push(`City validation error ${city.name}: ${error}`);
       }
     }
 
-    // Valider les relations hiérarchiques
+    // Validate hierarchical relationships
     const regionIds = new Set(regions.map(r => r.id));
     for (const node of nodes) {
       if (!regionIds.has(node.region_id)) {
-        errors.push(`Node ${node.name} référence une région inexistante: ${node.region_id}`);
+        errors.push(`Node ${node.name} references non-existent region: ${node.region_id}`);
       }
     }
 
     const nodeIds = new Set(nodes.map(n => n.id));
     for (const city of cities) {
       if (!nodeIds.has(city.node_id)) {
-        errors.push(`Ville ${city.name} référence un node inexistant: ${city.node_id}`);
+        errors.push(`City ${city.name} references non-existent node: ${city.node_id}`);
       }
     }
 
     if (errors.length > 0) {
-      logger.error('Erreurs de validation détectées:', errors);
-      throw new Error(`${errors.length} erreurs de validation: ${errors.slice(0, 3).join(', ')}${errors.length > 3 ? '...' : ''}`);
+      logger.error('Validation errors detected', { errors });
+      throw new Error(`${errors.length} validation errors: ${errors.slice(0, 3).join(', ')}${errors.length > 3 ? '...' : ''}`);
     }
 
-    logger.info('✅ Validation des données terminée');
+    logger.info('Zone data validation completed successfully');
   }
 
-private async precomputeAllChunks(regions: Region[], nodes: Node[], cities: City[]): Promise<{
-  chunksProcessed: number;
-  errors: number;
-}> {
-  // Si aucune zone n'existe, ne pas pré-calculer
-  if (regions.length === 0 && nodes.length === 0 && cities.length === 0) {
-    logger.info('🎯 Aucune zone définie, pré-calcul ignoré');
-    return { chunksProcessed: 0, errors: 0 };
-  }
+  private async precomputeAllChunks(regions: Region[], nodes: Node[], cities: City[]): Promise<{
+    chunksProcessed: number;
+    errors: number;
+  }> {
+    // If no zones exist, skip pre-computation
+    if (regions.length === 0 && nodes.length === 0 && cities.length === 0) {
+      logger.info('No zones defined, skipping chunk pre-computation');
+      return { chunksProcessed: 0, errors: 0 };
+    }
 
-  const minChunk = parseInt(process.env.CHUNK_MIN || '-2000');
-  const maxChunk = parseInt(process.env.CHUNK_MAX || '2000');
-  const batchSize = parseInt(process.env.PRECOMPUTE_BATCH_SIZE || '1000');
-  
-  let processedChunks = 0;
-  let errorCount = 0;
-  const totalChunks = (maxChunk - minChunk + 1) ** 2;
-  const errors: string[] = [];
-  
-  logger.info(`🔢 Calcul de ${totalChunks.toLocaleString()} chunks pour ${regions.length} régions...`);
-
-  // Optimisation : calculer seulement les chunks qui intersectent avec les zones
-  const relevantChunks = this.getRelevantChunks(regions, nodes, cities);
-  
-  if (relevantChunks.length === 0) {
-    logger.info('🎯 Aucun chunk pertinent trouvé, pré-calcul ignoré');
-    return { chunksProcessed: 0, errors: 0 };
-  }
-
-  logger.info(`🎯 Calcul optimisé: ${relevantChunks.length} chunks pertinents au lieu de ${totalChunks.toLocaleString()}`);
-
-  // Traitement par batch des chunks pertinents uniquement
-  const batchPromises: Promise<void>[] = [];
-  
-  for (const chunk of relevantChunks) {
-    batchPromises.push(
-      this.processChunk(chunk.x, chunk.z, regions, nodes, cities)
-        .catch(error => {
-          errorCount++;
-          const errorMsg = `Chunk (${chunk.x}, ${chunk.z}): ${error.message}`;
-          if (errors.length < 10) {
-            errors.push(errorMsg);
-          }
-        })
-    );
+    const batchSize = parseInt(process.env.PRECOMPUTE_BATCH_SIZE || '1000');
     
-    // Traiter par batch
-    if (batchPromises.length >= batchSize) {
-      await Promise.allSettled(batchPromises);
-      batchPromises.length = 0;
+    let processedChunks = 0;
+    let errorCount = 0;
+    const errors: string[] = [];
+    
+    logger.info('Starting chunk computation for zones', { regionsCount: regions.length });
+
+    // Optimization: calculate only chunks that intersect with zones
+    const relevantChunks = this.getRelevantChunks(regions, nodes, cities);
+    
+    if (relevantChunks.length === 0) {
+      logger.info('No relevant chunks found, skipping pre-computation');
+      return { chunksProcessed: 0, errors: 0 };
+    }
+
+    logger.info('Optimized chunk computation', { 
+      relevantChunks: relevantChunks.length 
+    });
+
+    // Process chunks in batches
+    const batchPromises: Promise<void>[] = [];
+    
+    for (const chunk of relevantChunks) {
+      batchPromises.push(
+        this.processChunk(chunk.x, chunk.z, regions, nodes, cities)
+          .catch(error => {
+            errorCount++;
+            const errorMsg = `Chunk (${chunk.x}, ${chunk.z}): ${error.message}`;
+            if (errors.length < 10) {
+              errors.push(errorMsg);
+            }
+          })
+      );
       
-      processedChunks += batchSize;
-      
-      if (processedChunks % 10000 === 0) {
-        const progress = Math.round((processedChunks / relevantChunks.length) * 100);
-        logger.info(`📊 Traité ${processedChunks.toLocaleString()}/${relevantChunks.length.toLocaleString()} chunks (${progress}%) - ${errorCount} erreurs`);
+      // Process in batches
+      if (batchPromises.length >= batchSize) {
+        await Promise.allSettled(batchPromises);
+        batchPromises.length = 0;
+        
+        processedChunks += batchSize;
+        
+        if (processedChunks % 10000 === 0) {
+          const progress = Math.round((processedChunks / relevantChunks.length) * 100);
+          logger.info('Chunk processing progress', { 
+            processed: processedChunks, 
+            total: relevantChunks.length, 
+            progressPercent: progress, 
+            errors: errorCount 
+          });
+        }
       }
     }
-  }
-  
-  // Traiter le dernier batch
-  if (batchPromises.length > 0) {
-    await Promise.allSettled(batchPromises);
-    processedChunks += batchPromises.length;
+    
+    // Process final batch
+    if (batchPromises.length > 0) {
+      await Promise.allSettled(batchPromises);
+      processedChunks += batchPromises.length;
+    }
+
+    if (errorCount > 0) {
+      logger.warn('Chunk processing completed with errors', { 
+        totalProcessed: processedChunks, 
+        errors: errorCount 
+      });
+      if (errors.length > 0) {
+        logger.debug('Sample errors', { errors });
+      }
+    }
+
+    logger.info('Chunk pre-computation completed', { 
+      chunksProcessed: processedChunks, 
+      errors: errorCount 
+    });
+    
+    return { chunksProcessed: processedChunks, errors: errorCount };
   }
 
-  if (errorCount > 0) {
-    logger.warn(`⚠️ ${errorCount} erreurs de traitement chunks`);
-    if (errors.length > 0) {
-      logger.debug('Exemples d\'erreurs:', errors);
+  // Get only relevant chunks that intersect with zones
+  private getRelevantChunks(regions: Region[], nodes: Node[], cities: City[]): Array<{x: number, z: number}> {
+    const chunks = new Set<string>();
+    
+    // Get all chunks from regions
+    for (const region of regions) {
+      const regionChunks = this.calculator.getChunksInPolygon(region.chunk_boundary);
+      for (const chunk of regionChunks) {
+        chunks.add(`${chunk.x},${chunk.z}`);
+      }
     }
-  }
-
-  logger.info(`🎯 Pré-calcul terminé: ${processedChunks.toLocaleString()} chunks traités avec ${errorCount} erreurs`);
-  return { chunksProcessed: processedChunks, errors: errorCount };
-}
-
-// Nouvelle méthode pour obtenir uniquement les chunks pertinents
-private getRelevantChunks(regions: Region[], nodes: Node[], cities: City[]): Array<{x: number, z: number}> {
-  const chunks = new Set<string>();
-  
-  // Obtenir tous les chunks des régions
-  for (const region of regions) {
-    const regionChunks = this.calculator.getChunksInPolygon(region.chunk_boundary);
-    for (const chunk of regionChunks) {
-      chunks.add(`${chunk.x},${chunk.z}`);
+    
+    // Add chunks from nodes
+    for (const node of nodes) {
+      const nodeChunks = this.calculator.getChunksInPolygon(node.chunk_boundary);
+      for (const chunk of nodeChunks) {
+        chunks.add(`${chunk.x},${chunk.z}`);
+      }
     }
-  }
-  
-  // Ajouter les chunks des nodes
-  for (const node of nodes) {
-    const nodeChunks = this.calculator.getChunksInPolygon(node.chunk_boundary);
-    for (const chunk of nodeChunks) {
-      chunks.add(`${chunk.x},${chunk.z}`);
+    
+    // Add chunks from cities
+    for (const city of cities) {
+      const cityChunks = this.calculator.getChunksInPolygon(city.chunk_boundary);
+      for (const chunk of cityChunks) {
+        chunks.add(`${chunk.x},${chunk.z}`);
+      }
     }
+    
+    // Convert to array
+    return Array.from(chunks).map(coord => {
+      const [x, z] = coord.split(',').map(Number);
+      return { x, z };
+    });
   }
-  
-  // Ajouter les chunks des villes
-  for (const city of cities) {
-    const cityChunks = this.calculator.getChunksInPolygon(city.chunk_boundary);
-    for (const chunk of cityChunks) {
-      chunks.add(`${chunk.x},${chunk.z}`);
-    }
-  }
-  
-  // Convertir en tableau
-  return Array.from(chunks).map(coord => {
-    const [x, z] = coord.split(',').map(Number);
-    return { x, z };
-  });
-}
 
   private async processChunk(
     chunkX: number, 
@@ -285,24 +351,23 @@ private getRelevantChunks(regions: Region[], nodes: Node[], cities: City[]): Arr
     try {
       const zoneData = this.calculator.calculateChunkZones(chunkX, chunkZ, regions, nodes, cities);
       
-      // Sauvegarder seulement si le chunk appartient à une zone
+      // Save only if chunk belongs to a zone
       if (zoneData.regionId) {
         await this.redis.setChunkZone(chunkX, chunkZ, zoneData);
       }
     } catch (error) {
-      // Propager l'erreur pour qu'elle soit comptée
-      throw new Error(`Erreur calcul: ${error instanceof Error ? error.message : 'Erreur inconnue'}`);
+      throw new Error(`Calculation error: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
   private async cacheZoneMetadata(regions: Region[], nodes: Node[], cities: City[]): Promise<void> {
-    logger.info('💾 Mise en cache des métadonnées...');
+    logger.info('Caching zone metadata');
     
     const promises: Promise<void>[] = [];
     let successCount = 0;
     let errorCount = 0;
 
-    // Cache régions
+    // Cache regions
     for (const region of regions) {
       const promise = this.redis.cacheZoneMetadata('region', region.id, {
         name: region.name,
@@ -310,8 +375,8 @@ private getRelevantChunks(regions: Region[], nodes: Node[], cities: City[]): Arr
         is_active: region.is_active,
         created_at: region.created_at.toISOString()
       })
-        .then(() => { successCount++; }) // Correction: retourner void
-        .catch(() => { errorCount++; }); // Correction: retourner void
+        .then(() => { successCount++; })
+        .catch(() => { errorCount++; });
 
       promises.push(promise);
     }
@@ -327,13 +392,13 @@ private getRelevantChunks(regions: Region[], nodes: Node[], cities: City[]): Arr
         is_active: node.is_active,
         created_at: node.created_at.toISOString()
       })
-        .then(() => { successCount++; }) // Correction: retourner void
-        .catch(() => { errorCount++; }); // Correction: retourner void
+        .then(() => { successCount++; })
+        .catch(() => { errorCount++; });
 
       promises.push(promise);
     }
 
-    // Cache villes
+    // Cache cities
     for (const city of cities) {
       const promise = this.redis.cacheZoneMetadata('city', city.id, {
         name: city.name,
@@ -345,8 +410,8 @@ private getRelevantChunks(regions: Region[], nodes: Node[], cities: City[]): Arr
         is_active: city.is_active,
         created_at: city.created_at.toISOString()
       })
-        .then(() => { successCount++; }) // Correction: retourner void
-        .catch(() => { errorCount++; }); // Correction: retourner void
+        .then(() => { successCount++; })
+        .catch(() => { errorCount++; });
 
       promises.push(promise);
     }
@@ -354,32 +419,45 @@ private getRelevantChunks(regions: Region[], nodes: Node[], cities: City[]): Arr
     await Promise.allSettled(promises);
     
     if (errorCount > 0) {
-      logger.warn(`💾 Métadonnées mises en cache: ${successCount} succès, ${errorCount} erreurs`);
+      logger.warn('Zone metadata caching completed with errors', { 
+        successCount, 
+        errorCount 
+      });
     } else {
-      logger.info(`💾 Métadonnées mises en cache: ${successCount} zones`);
+      logger.info('Zone metadata cached successfully', { 
+        zonesCount: successCount 
+      });
     }
   }
 
   // ========== SYNCHRONISATION INCRÉMENTALE ==========
   async startIncrementalSync(): Promise<void> {
-    logger.info('👂 Démarrage de la synchronisation incrémentale...');
+    logger.info('Starting incremental synchronization listener');
     
     try {
       await this.db.listenToChanges(async (notification: PostgresNotification) => {
-        logger.info(`🔄 Changement détecté: ${notification.operation} sur ${notification.table} (ID: ${notification.id})`);
+        logger.info('Database change detected', { 
+          operation: notification.operation, 
+          table: notification.table, 
+          id: notification.id 
+        });
         
         try {
           await this.handlePostgresNotification(notification);
         } catch (error) {
-          logger.error('❌ Erreur traitement notification:', error);
-          // Ne pas faire échouer le processus pour une erreur de sync
+          logger.error('Failed to handle notification', { 
+            notification, 
+            error: error instanceof Error ? error.message : 'Unknown error' 
+          });
         }
       });
       
-      logger.info('✅ Synchronisation incrémentale démarrée');
+      logger.info('Incremental synchronization listener started');
     } catch (error) {
-      logger.error('❌ Erreur démarrage sync incrémentale:', error);
-      throw new Error('Impossible de démarrer la synchronisation incrémentale');
+      logger.error('Failed to start incremental sync', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to start incremental synchronization');
     }
   }
 
@@ -396,36 +474,44 @@ private getRelevantChunks(regions: Region[], nodes: Node[], cities: City[]): Arr
           await this.handleZoneDelete(table, id);
           break;
         default:
-          logger.warn(`Opération inconnue: ${operation}`);
+          logger.warn('Unknown operation', { operation });
       }
     } catch (error) {
-      logger.error(`Erreur handlePostgresNotification ${table}:${id}:`, error);
+      logger.error('Failed to handle postgres notification', { 
+        table, 
+        operation, 
+        id, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
       throw error;
     }
   }
 
   private async handleZoneUpdate(table: string, zoneId: number): Promise<void> {
     try {
-      // 1. Invalider le cache Redis de cette zone
+      // 1. Invalidate Redis cache for this zone
       const zoneType = table.slice(0, -1) as 'region' | 'node' | 'city'; // regions -> region
       await this.redis.invalidateZoneCache(zoneType, zoneId);
       
-      // 2. Recharger la zone depuis la DB
+      // 2. Reload zone from database
       const zone = await this.db.getZoneById(zoneType, zoneId);
       if (!zone) {
-        logger.warn(`Zone ${table}:${zoneId} non trouvée après UPDATE`);
+        logger.warn('Zone not found after UPDATE', { table, zoneId });
         return;
       }
 
-      // 3. Recalculer les chunks affectés
+      // 3. Recalculate affected chunks
       await this.recalculateZoneChunks(zoneType, zone);
       
-      // 4. Mettre à jour le cache métadonnées
-      await this.updateZoneMetadataCache(zoneType, zone);
+await this.updateZoneMetadataCache(zoneType, zone);
       
-      logger.info(`✅ Zone ${table}:${zoneId} mise à jour`);
+      logger.info('Zone updated successfully', { table, zoneId });
     } catch (error) {
-      logger.error(`Erreur handleZoneUpdate ${table}:${zoneId}:`, error);
+      logger.error('Failed to handle zone update', { 
+        table, 
+        zoneId, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
       throw error;
     }
   }
@@ -434,27 +520,35 @@ private getRelevantChunks(regions: Region[], nodes: Node[], cities: City[]): Arr
     try {
       const zoneType = table.slice(0, -1) as 'region' | 'node' | 'city';
       
-      // 1. Invalider le cache de cette zone
+      // 1. Invalidate cache for this zone
       await this.redis.invalidateZoneCache(zoneType, zoneId);
       
-      // 2. Supprimer tous les chunks qui référençaient cette zone
+      // 2. Remove chunks that referenced this zone
       let deletedChunks = 0;
       
       if (zoneType === 'region') {
         deletedChunks = await this.redis.deleteChunkZonesByPattern(`chunk:zone:*`);
-        // Après suppression d'une région, tout recalculer
+        // After region deletion, recalculate everything
         await this.recalculateAllChunks();
       } else if (zoneType === 'node') {
-        // Recalculer les chunks de la région parente
+        // Recalculate chunks of parent region
         await this.recalculateNodeParentChunks(zoneId);
       } else if (zoneType === 'city') {
-        // Recalculer les chunks du node parent
+        // Recalculate chunks of parent node
         await this.recalculateCityParentChunks(zoneId);
       }
       
-      logger.info(`🗑️ Zone ${table}:${zoneId} supprimée (${deletedChunks} chunks affectés)`);
+      logger.info('Zone deleted successfully', { 
+        table, 
+        zoneId, 
+        deletedChunks 
+      });
     } catch (error) {
-      logger.error(`Erreur handleZoneDelete ${table}:${zoneId}:`, error);
+      logger.error('Failed to handle zone delete', { 
+        table, 
+        zoneId, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
       throw error;
     }
   }
@@ -463,16 +557,16 @@ private getRelevantChunks(regions: Region[], nodes: Node[], cities: City[]): Arr
     zoneType: 'region' | 'node' | 'city', 
     zone: Region | Node | City
   ): Promise<void> {
-    logger.info(`🔄 Recalcul chunks pour ${zoneType}:${zone.id}`);
+    logger.info('Recalculating chunks for zone', { zoneType, zoneId: zone.id });
     
     try {
-      // Obtenir tous les chunks dans le polygone de cette zone
+      // Get all chunks in this zone's polygon
       const chunks = this.calculator.getChunksInPolygon(zone.chunk_boundary);
       let successCount = 0;
       let errorCount = 0;
       
       if (zoneType === 'region') {
-        // Pour une région, recalculer avec tous les nodes et villes
+        // For region, recalculate with all nodes and cities
         const [nodes, cities] = await Promise.all([
           this.db.getAllNodes(),
           this.db.getAllCities()
@@ -489,13 +583,17 @@ private getRelevantChunks(regions: Region[], nodes: Node[], cities: City[]): Arr
             successCount++;
           } catch (error) {
             errorCount++;
-            if (errorCount <= 5) { // Logger seulement les 5 premières erreurs
-              logger.error(`Erreur recalcul chunk (${chunk.x}, ${chunk.z}):`, error);
+            if (errorCount <= 5) {
+              logger.error('Failed to recalculate chunk', { 
+                chunkX: chunk.x, 
+                chunkZ: chunk.z, 
+                error: error instanceof Error ? error.message : 'Unknown error' 
+              });
             }
           }
         }
       } else if (zoneType === 'node') {
-        // Pour un node, recalculer avec sa région parent et toutes les villes
+        // For node, recalculate with parent region and all cities
         const nodeObj = zone as Node;
         const [region, cities] = await Promise.all([
           this.db.getZoneById('region', nodeObj.region_id),
@@ -503,7 +601,7 @@ private getRelevantChunks(regions: Region[], nodes: Node[], cities: City[]): Arr
         ]);
         
         if (!region) {
-          throw new Error(`Région parent ${nodeObj.region_id} non trouvée`);
+          throw new Error(`Parent region ${nodeObj.region_id} not found`);
         }
         
         const regions = [region as Region];
@@ -519,12 +617,16 @@ private getRelevantChunks(regions: Region[], nodes: Node[], cities: City[]): Arr
           } catch (error) {
             errorCount++;
             if (errorCount <= 5) {
-              logger.error(`Erreur recalcul chunk (${chunk.x}, ${chunk.z}):`, error);
+              logger.error('Failed to recalculate chunk', { 
+                chunkX: chunk.x, 
+                chunkZ: chunk.z, 
+                error: error instanceof Error ? error.message : 'Unknown error' 
+              });
             }
           }
         }
       } else {
-        // Pour une ville, recalculer avec son node et région parents
+        // For city, recalculate with parent node and region
         const cityObj = zone as City;
         const [node, regions, nodes, cities] = await Promise.all([
           this.db.getZoneById('node', cityObj.node_id),
@@ -534,7 +636,7 @@ private getRelevantChunks(regions: Region[], nodes: Node[], cities: City[]): Arr
         ]);
         
         if (!node) {
-          throw new Error(`Node parent ${cityObj.node_id} non trouvé`);
+          throw new Error(`Parent node ${cityObj.node_id} not found`);
         }
         
         for (const chunk of chunks) {
@@ -547,19 +649,36 @@ private getRelevantChunks(regions: Region[], nodes: Node[], cities: City[]): Arr
           } catch (error) {
             errorCount++;
             if (errorCount <= 5) {
-              logger.error(`Erreur recalcul chunk (${chunk.x}, ${chunk.z}):`, error);
+              logger.error('Failed to recalculate chunk', { 
+                chunkX: chunk.x, 
+                chunkZ: chunk.z, 
+                error: error instanceof Error ? error.message : 'Unknown error' 
+              });
             }
           }
         }
       }
       
       if (errorCount > 0) {
-        logger.warn(`⚠️ ${successCount} chunks recalculés, ${errorCount} erreurs pour ${zoneType}:${zone.id}`);
+        logger.warn('Zone chunks recalculated with errors', { 
+          zoneType, 
+          zoneId: zone.id, 
+          successCount, 
+          errorCount 
+        });
       } else {
-        logger.info(`✅ ${successCount} chunks recalculés pour ${zoneType}:${zone.id}`);
+        logger.info('Zone chunks recalculated successfully', { 
+          zoneType, 
+          zoneId: zone.id, 
+          chunksCount: successCount 
+        });
       }
     } catch (error) {
-      logger.error(`Erreur recalculateZoneChunks ${zoneType}:${zone.id}:`, error);
+      logger.error('Failed to recalculate zone chunks', { 
+        zoneType, 
+        zoneId: zone.id, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
       throw error;
     }
   }
@@ -606,13 +725,17 @@ private getRelevantChunks(regions: Region[], nodes: Node[], cities: City[]): Arr
       
       await this.redis.cacheZoneMetadata(zoneType, zone.id, metadata);
     } catch (error) {
-      logger.error(`Erreur updateZoneMetadataCache ${zoneType}:${zone.id}:`, error);
+      logger.error('Failed to update zone metadata cache', { 
+        zoneType, 
+        zoneId: zone.id, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
       throw error;
     }
   }
 
   private async recalculateAllChunks(): Promise<void> {
-    logger.warn('🔄 Recalcul complet de tous les chunks...');
+    logger.warn('Starting full chunk recalculation');
     
     try {
       const [regions, nodes, cities] = await Promise.all([
@@ -620,174 +743,196 @@ private getRelevantChunks(regions: Region[], nodes: Node[], cities: City[]): Arr
         this.db.getAllNodes(),
         this.db.getAllCities()
       ]);
-const result = await this.precomputeAllChunks(regions, nodes, cities);
-     logger.info(`✅ Recalcul complet terminé: ${result.chunksProcessed} chunks, ${result.errors} erreurs`);
-   } catch (error) {
-     logger.error('❌ Erreur recalcul complet:', error);
-     throw error;
-   }
- }
+      
+      const result = await this.precomputeAllChunks(regions, nodes, cities);
+      logger.info('Full chunk recalculation completed', { 
+        chunksProcessed: result.chunksProcessed, 
+        errors: result.errors 
+      });
+    } catch (error) {
+      logger.error('Failed to recalculate all chunks', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw error;
+    }
+  }
 
- private async recalculateNodeParentChunks(nodeId: number): Promise<void> {
-   logger.info(`🔄 Recalcul chunks après suppression node:${nodeId}`);
-   
-   try {
-     // Pour l'instant, recalcul complet (optimisation future possible)
-     // TODO: Optimiser en recalculant seulement les chunks de la région parente
-     await this.recalculateAllChunks();
-   } catch (error) {
-     logger.error(`Erreur recalculateNodeParentChunks ${nodeId}:`, error);
-     throw error;
-   }
- }
+  private async recalculateNodeParentChunks(nodeId: number): Promise<void> {
+    logger.info('Recalculating chunks after node deletion', { nodeId });
+    
+    try {
+      // For now, full recalculation (future optimization possible)
+      // TODO: Optimize by recalculating only parent region chunks
+      await this.recalculateAllChunks();
+    } catch (error) {
+      logger.error('Failed to recalculate node parent chunks', { 
+        nodeId, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw error;
+    }
+  }
 
- private async recalculateCityParentChunks(cityId: number): Promise<void> {
-   logger.info(`🔄 Recalcul chunks après suppression city:${cityId}`);
-   
-   try {
-     // Pour l'instant, recalcul complet (optimisation future possible)
-     // TODO: Optimiser en recalculant seulement les chunks du node parent
-     await this.recalculateAllChunks();
-   } catch (error) {
-     logger.error(`Erreur recalculateCityParentChunks ${cityId}:`, error);
-     throw error;
-   }
- }
+  private async recalculateCityParentChunks(cityId: number): Promise<void> {
+    logger.info('Recalculating chunks after city deletion', { cityId });
+    
+    try {
+      // For now, full recalculation (future optimization possible)
+      // TODO: Optimize by recalculating only parent node chunks
+      await this.recalculateAllChunks();
+    } catch (error) {
+      logger.error('Failed to recalculate city parent chunks', { 
+        cityId, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw error;
+    }
+  }
 
- // ========== NETTOYAGE ET MAINTENANCE ==========
- private scheduleCleanup(): void {
-   // Nettoyage automatique toutes les heures
-   this.cleanupInterval = setInterval(async () => {
-     try {
-       await this.performCleanup();
-     } catch (error) {
-       logger.error('Erreur nettoyage automatique:', error);
-     }
-   }, 60 * 60 * 1000); // 1 heure
+  // ========== NETTOYAGE ET MAINTENANCE ==========
+  private scheduleCleanup(): void {
+    // Automatic cleanup every hour
+    this.cleanupInterval = setInterval(async () => {
+      try {
+        await this.performCleanup();
+      } catch (error) {
+        logger.error('Automatic cleanup failed', { 
+          error: error instanceof Error ? error.message : 'Unknown error' 
+        });
+      }
+    }, 60 * 60 * 1000); // 1 hour
 
-   logger.info('🧹 Nettoyage automatique programmé (toutes les heures)');
- }
+    logger.info('Automatic cleanup scheduled', { intervalHours: 1 });
+  }
 
- async performCleanup(): Promise<{
-   deletedPlayers: number;
-   deletedChunks: number;
- }> {
-   logger.info('🧹 Début nettoyage automatique...');
-   
-   try {
-     const result = await this.redis.cleanupExpiredData();
-     
-     logger.info(`🧹 Nettoyage terminé: ${result.deletedPlayers} joueurs, ${result.deletedChunks} chunks supprimés`);
-     return result;
-   } catch (error) {
-     logger.error('❌ Erreur nettoyage:', error);
-     throw error;
-   }
- }
+  async performCleanup(): Promise<{
+    deletedPlayers: number;
+    deletedChunks: number;
+  }> {
+    logger.info('Starting automatic cleanup');
+    
+    try {
+      const result = await this.redis.cleanupExpiredData();
+      
+      logger.info('Automatic cleanup completed', { 
+        deletedPlayers: result.deletedPlayers, 
+        deletedChunks: result.deletedChunks 
+      });
+      return result;
+    } catch (error) {
+      logger.error('Cleanup failed', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw error;
+    }
+  }
 
- // ========== DIAGNOSTICS ET MONITORING ==========
- async getHealthStatus(): Promise<{
-   isHealthy: boolean;
-   lastSyncTime: Date | null;
-   syncInProgress: boolean;
-   issues: string[];
- }> {
-   const issues: string[] = [];
-   
-   try {
-     // Vérifier Redis
-     await this.redis.getStats();
-   } catch (error) {
-     issues.push('Redis inaccessible');
-   }
-   
-   try {
-     // Vérifier PostgreSQL
-     await this.db.getZoneStats();
-   } catch (error) {
-     issues.push('PostgreSQL inaccessible');
-   }
-   
-   // Vérifier si la dernière sync n'est pas trop ancienne
-   if (this.lastSyncTime) {
-     const timeSinceLastSync = Date.now() - this.lastSyncTime.getTime();
-     if (timeSinceLastSync > 24 * 60 * 60 * 1000) { // 24 heures
-       issues.push('Dernière synchronisation trop ancienne');
-     }
-   } else {
-     issues.push('Aucune synchronisation effectuée');
-   }
-   
-   return {
-     isHealthy: issues.length === 0,
-     lastSyncTime: this.lastSyncTime,
-     syncInProgress: this.syncInProgress,
-     issues
-   };
- }
+  // ========== DIAGNOSTICS ET MONITORING ==========
+  async getHealthStatus(): Promise<{
+    isHealthy: boolean;
+    lastSyncTime: Date | null;
+    syncInProgress: boolean;
+    issues: string[];
+  }> {
+    const issues: string[] = [];
+    
+    try {
+      // Check Redis
+      await this.redis.getStats();
+    } catch (error) {
+      issues.push('Redis inaccessible');
+    }
+    
+    try {
+      // Check PostgreSQL
+      await this.db.getZoneStats();
+    } catch (error) {
+      issues.push('PostgreSQL inaccessible');
+    }
+    
+    // Check if last sync is not too old
+    if (this.lastSyncTime) {
+      const timeSinceLastSync = Date.now() - this.lastSyncTime.getTime();
+      if (timeSinceLastSync > 24 * 60 * 60 * 1000) { // 24 hours
+        issues.push('Last synchronization too old');
+      }
+    } else {
+      issues.push('No synchronization performed');
+    }
+    
+    return {
+      isHealthy: issues.length === 0,
+      lastSyncTime: this.lastSyncTime,
+      syncInProgress: this.syncInProgress,
+      issues
+    };
+  }
 
- async getDetailedStats(): Promise<{
-   database: any;
-   redis: any;
-   sync: {
-     lastSyncTime: Date | null;
-     syncInProgress: boolean;
-     isInitialized: boolean;
-   };
- }> {
-   try {
-     const [dbStats, redisStats] = await Promise.all([
-       this.db.getZoneStats(),
-       this.redis.getStats()
-     ]);
-     
-     return {
-       database: dbStats,
-       redis: redisStats,
-       sync: {
-         lastSyncTime: this.lastSyncTime,
-         syncInProgress: this.syncInProgress,
-         isInitialized: this.isInitialized
-       }
-     };
-   } catch (error) {
-     logger.error('Erreur getDetailedStats:', error);
-     throw error;
-   }
- }
+  async getDetailedStats(): Promise<{
+    database: any;
+    redis: any;
+    sync: {
+      lastSyncTime: Date | null;
+      syncInProgress: boolean;
+      isInitialized: boolean;
+    };
+  }> {
+    try {
+      const [dbStats, redisStats] = await Promise.all([
+        this.db.getZoneStats(),
+        this.redis.getStats()
+      ]);
+      
+      return {
+        database: dbStats,
+        redis: redisStats,
+        sync: {
+          lastSyncTime: this.lastSyncTime,
+          syncInProgress: this.syncInProgress,
+          isInitialized: this.isInitialized
+        }
+      };
+    } catch (error) {
+      logger.error('Failed to get detailed stats', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw error;
+    }
+  }
 
- // ========== MÉTHODES PUBLIQUES ==========
- isReady(): boolean {
-   return this.isInitialized && !this.syncInProgress;
- }
+  // ========== MÉTHODES PUBLIQUES ==========
+  isReady(): boolean {
+    return this.isInitialized && !this.syncInProgress;
+  }
 
- getLastSyncTime(): Date | null {
-   return this.lastSyncTime;
- }
+  getLastSyncTime(): Date | null {
+    return this.lastSyncTime;
+  }
 
- isSyncInProgress(): boolean {
-   return this.syncInProgress;
- }
+  isSyncInProgress(): boolean {
+    return this.syncInProgress;
+  }
 
- async forceFreshSync(): Promise<void> {
-   if (this.syncInProgress) {
-     throw new Error('Une synchronisation est déjà en cours');
-   }
-   
-   logger.info('🔄 Synchronisation forcée démarrée...');
-   await this.fullSync();
- }
+  async forceFreshSync(): Promise<void> {
+    if (this.syncInProgress) {
+      throw new Error('Synchronization already in progress');
+    }
+    
+    logger.info('Forced synchronization started');
+    await this.fullSync();
+    await this.syncPlayersFromDatabase();
+  }
 
- // ========== NETTOYAGE À LA FERMETURE ==========
- async destroy(): Promise<void> {
-   logger.info('🛑 Arrêt ZoneSyncService...');
-   
-   if (this.cleanupInterval) {
-     clearInterval(this.cleanupInterval);
-     this.cleanupInterval = null;
-   }
-   
-   this.isInitialized = false;
-   logger.info('✅ ZoneSyncService arrêté');
- }
+  // ========== NETTOYAGE À LA FERMETURE ==========
+  async destroy(): Promise<void> {
+    logger.info('Shutting down zone sync service');
+    
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+      this.cleanupInterval = null;
+    }
+    
+    this.isInitialized = false;
+    logger.info('Zone sync service shut down successfully');
+  }
 }
