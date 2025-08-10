@@ -20,37 +20,44 @@ export class ZoneSyncService {
     private batchService?: DatabaseBatchService
   ) {}
 
-  async init(): Promise<void> {
-    if (this.isInitialized) return;
+async init(): Promise<void> {
+  if (this.isInitialized) return;
 
-    logger.info('🚀 Initializing REAL-TIME zone sync service');
+  logger.info('🚀 Initializing REAL-TIME zone sync service');
+  
+  try {
+    // 1. Complete initial synchronization
+    await this.fullSync();
+    logger.info('✅ Full sync completed - continuing...'); // ✅ AJOUT
     
-    try {
-      // 1. Complete initial synchronization
-      await this.fullSync();
-      
-      // 2. Bidirectional sync: Database to Redis
-      await this.syncPlayersFromDatabase();
-      
-      // 3. Start PostgreSQL change listener (auto-recalcul zones)
-      await this.startPostgresListener();
-      
-      // 4. ✅ Start Redis keyspace notifications (REAL-TIME positions)
-      await this.startRedisKeyspaceListener();
-      
-      // 5. Schedule automatic cleanup
-      this.scheduleCleanup();
-      
-      this.isInitialized = true;
-      logger.info('✅ REAL-TIME zone sync service initialized successfully');
-      logger.info('🔥 Plugin Minecraft → Redis → WebSocket (< 5ms latency)');
-    } catch (error) {
-      logger.error('Failed to initialize zone sync service', { 
-        error: error instanceof Error ? error.message : 'Unknown error' 
-      });
-      throw new Error('Unable to initialize synchronization service');
-    }
+    // 2. Bidirectional sync: Database to Redis
+    await this.syncPlayersFromDatabase();
+    logger.info('✅ Bidirectional sync completed - continuing...'); // ✅ AJOUT
+    
+    // 3. Start PostgreSQL change listener (auto-recalcul zones)
+    logger.info('🔄 About to start PostgreSQL listener...'); // ✅ AJOUT
+    await this.startPostgresListener();
+    logger.info('✅ PostgreSQL listener started - continuing...'); // ✅ AJOUT
+    
+    // 4. ✅ Start Redis keyspace notifications (REAL-TIME positions)
+    logger.info('🔥 About to start Redis keyspace listener...'); // ✅ AJOUT
+    await this.startRedisKeyspaceListener();
+    logger.info('✅ Redis keyspace listener started - continuing...'); // ✅ AJOUT
+    
+    // 5. Schedule automatic cleanup
+    this.scheduleCleanup();
+    logger.info('✅ Cleanup scheduled - continuing...'); // ✅ AJOUT
+    
+    this.isInitialized = true;
+    logger.info('✅ REAL-TIME zone sync service initialized successfully');
+    logger.info('🔥 Plugin Minecraft → Redis → WebSocket (< 5ms latency)');
+  } catch (error) {
+    logger.error('❌ Failed to initialize zone sync service', { 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
+    throw new Error('Unable to initialize synchronization service');
   }
+}
 
   // ========== ✅ REAL-TIME REDIS KEYSPACE LISTENER ==========
   private async startRedisKeyspaceListener(): Promise<void> {
@@ -843,6 +850,7 @@ export class ZoneSyncService {
        }
      }
    }
+   
    
    // Process final batch
    if (batchPromises.length > 0) {
