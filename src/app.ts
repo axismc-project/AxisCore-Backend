@@ -412,9 +412,8 @@ class Application {
     // ========== PLAYER ENDPOINTS ==========
     
     // Player creation
-    this.app.post('/api/player/create',
-      this.playerController.createPlayer.bind(this.playerController)
-    );
+this.app.post('/api/player/connection', this.playerController.handlePlayerConnection.bind(this.playerController));
+
 
     // Player info
     this.app.get('/api/player/:uuid', 
@@ -485,7 +484,7 @@ class Application {
         suggestion: 'Check the API documentation for available endpoints',
         availableEndpoints: {
           zones: ['GET /api/chunk/:x/:z', 'GET /api/zones/hierarchy', 'GET /api/zone/:type/:id'],
-          players: ['POST /api/player/create', 'GET /api/player/:uuid', 'POST /api/player/:uuid/position'],
+          players: ['POST /api/player/connection', 'GET /api/player/:uuid', 'POST /api/player/:uuid/position'],
           monitoring: ['GET /api/stats', 'GET /api/health', 'GET /api/system'],
           admin: ['POST /api/admin/sync', 'GET /api/admin/api-keys/stats'],
           websocket: 'ws://localhost:3000/ws/zones?api_key=your_key'

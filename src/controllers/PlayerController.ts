@@ -2,23 +2,26 @@ import { Request, Response } from 'express';
 import { RedisService } from '../services/RedisService';
 import { DatabaseService } from '../services/DatabaseService';
 import { DatabaseBatchService } from '../services/DatabaseBatchService';
+import { PlayerConnectionBatchService } from '../services/PlayerConnectionBatchService';
 import { SecurityUtils } from '../utils/security';
 import { logger } from '../utils/logger';
 
 export class PlayerController {
   private batchService: DatabaseBatchService;
+  private connectionBatchService: PlayerConnectionBatchService;
 
   constructor(
     private redis: RedisService,
     private db: DatabaseService
   ) {
     this.batchService = new DatabaseBatchService(this.db);
+    this.connectionBatchService = new PlayerConnectionBatchService(this.db);
   }
 
-  // ========== PLAYER ENDPOINTS ==========
-  async createPlayer(req: Request, res: Response): Promise<void> {
+  // ========== PLAYER CONNECTION/DISCONNECTION ==========
+  async handlePlayerConnection(req: Request, res: Response): Promise<void> {
     try {
-      const { uuid, name, x, y, z } = req.body;
+      const { uuid, name, isOnline } = req.body;
       
       if (!SecurityUtils.isValidUUID(uuid)) {
         res.status(400).json({
@@ -36,36 +39,38 @@ export class PlayerController {
         return;
       }
 
-      if (!SecurityUtils.isValidCoordinate(x) || !SecurityUtils.isValidCoordinate(y) || !SecurityUtils.isValidCoordinate(z)) {
+      if (typeof isOnline !== 'boolean') {
         res.status(400).json({
-          error: 'Invalid coordinates',
-          message: 'x, y, z must be valid finite numbers within bounds'
+          error: 'Invalid isOnline',
+          message: 'isOnline must be a boolean'
         });
         return;
       }
 
-      await this.db.createPlayer(uuid, name, x, y, z);
+      // Ajouter à la file d'attente de connexions
+      this.connectionBatchService.queuePlayerConnection({
+        uuid,
+        name,
+        isOnline
+      });
 
-      res.status(201).json({
-        message: 'Player created successfully',
+      res.json({
+        message: `Player ${isOnline ? 'connection' : 'disconnection'} queued successfully`,
         data: {
           uuid,
           name,
-          x,
-          y,
-          z,
-          chunkX: Math.floor(x / 16),
-          chunkZ: Math.floor(z / 16)
+          isOnline,
+          queued: true
         }
       });
 
     } catch (error) {
-      logger.error('Failed to create player', { 
+      logger.error('Failed to handle player connection', { 
         error: error instanceof Error ? error.message : 'Unknown error' 
       });
       res.status(500).json({ 
         error: 'Server error',
-        message: 'Unable to create player'
+        message: 'Unable to handle player connection'
       });
     }
   }
@@ -219,135 +224,143 @@ export class PlayerController {
       if (!SecurityUtils.isValidChunkCoordinate(chunkX) || !SecurityUtils.isValidChunkCoordinate(chunkZ)) {
         res.status(400).json({
           error: 'Invalid chunk coordinates',
-message: 'chunkX and chunkZ must be valid integers within bounds'
-       });
-       return;
-     }
+          message: 'chunkX and chunkZ must be valid integers within bounds'
+        });
+        return;
+      }
 
-     // Update chunk in Redis
-     await this.redis.setPlayerChunk(uuid, chunkX, chunkZ);
+      // Update chunk in Redis
+      await this.redis.setPlayerChunk(uuid, chunkX, chunkZ);
 
-     // Get zone information for this chunk
-     const zoneData = await this.redis.getChunkZone(chunkX, chunkZ);
+      // Get zone information for this chunk
+      const zoneData = await this.redis.getChunkZone(chunkX, chunkZ);
 
-     if (zoneData?.regionId || zoneData?.nodeId || zoneData?.cityId) {
-       await this.redis.setPlayerZones(uuid, {
-         region_id: zoneData.regionId ?? undefined,   // ✅ null → undefined
-         node_id: zoneData.nodeId ?? undefined,       // ✅ null → undefined
-         city_id: zoneData.cityId ?? undefined,       // ✅ null → undefined
-         last_update: Date.now()
-       });
-     }
+      if (zoneData?.regionId || zoneData?.nodeId || zoneData?.cityId) {
+        await this.redis.setPlayerZones(uuid, {
+          region_id: zoneData.regionId ?? undefined,   // ✅ null → undefined
+          node_id: zoneData.nodeId ?? undefined,       // ✅ null → undefined
+          city_id: zoneData.cityId ?? undefined,       // ✅ null → undefined
+          last_update: Date.now()
+        });
+      }
 
-     res.json({
-       message: 'Chunk updated successfully',
-       data: {
-         uuid,
-         chunkX,
-         chunkZ,
-         zones: zoneData
-       }
-     });
-     
-   } catch (error) {
-     logger.error('Failed to update player chunk', { 
-       uuid: req.params.uuid,
-       error: error instanceof Error ? error.message : 'Unknown error' 
-     });
-     res.status(500).json({ 
-       error: 'Server error',
-       message: 'Unable to update player chunk'
-     });
-   }
- }
+      res.json({
+        message: 'Chunk updated successfully',
+        data: {
+          uuid,
+          chunkX,
+          chunkZ,
+          zones: zoneData
+        }
+      });
+      
+    } catch (error) {
+      logger.error('Failed to update player chunk', { 
+        uuid: req.params.uuid,
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      res.status(500).json({ 
+        error: 'Server error',
+        message: 'Unable to update player chunk'
+      });
+    }
+  }
 
- async getPlayerCurrentZones(req: Request, res: Response): Promise<void> {
-   try {
-     const { uuid } = req.params;
-     
-     if (!SecurityUtils.isValidUUID(uuid)) {
-       res.status(400).json({ 
-         error: 'Invalid UUID',
-         message: 'UUID must be in valid format'
-       });
-       return;
-     }
-     
-     const zones = await this.redis.getPlayerZones(uuid);
-     
-     if (!zones) {
-       res.status(404).json({ 
-         error: 'Player zones not found',
-         message: `No zone data for player ${uuid}`
-       });
-       return;
-     }
-     
-     res.json({
-       message: 'Player zones retrieved',
-       data: zones
-     });
-     
-   } catch (error) {
-     logger.error('Failed to get player zones', { 
-       uuid: req.params.uuid,
-       error: error instanceof Error ? error.message : 'Unknown error' 
-     });
-     res.status(500).json({ 
-       error: 'Server error',
-       message: 'Unable to get player zones'
-     });
-   }
- }
+  async getPlayerCurrentZones(req: Request, res: Response): Promise<void> {
+    try {
+      const { uuid } = req.params;
+      
+      if (!SecurityUtils.isValidUUID(uuid)) {
+        res.status(400).json({ 
+          error: 'Invalid UUID',
+          message: 'UUID must be in valid format'
+        });
+        return;
+      }
+      
+      const zones = await this.redis.getPlayerZones(uuid);
+      
+      if (!zones) {
+        res.status(404).json({ 
+          error: 'Player zones not found',
+          message: `No zone data for player ${uuid}`
+        });
+        return;
+      }
+      
+      res.json({
+        message: 'Player zones retrieved',
+        data: zones
+      });
+      
+    } catch (error) {
+      logger.error('Failed to get player zones', { 
+        uuid: req.params.uuid,
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      res.status(500).json({ 
+        error: 'Server error',
+        message: 'Unable to get player zones'
+      });
+    }
+  }
 
- // ========== BATCH SERVICE ENDPOINTS ==========
- async getBatchStats(req: Request, res: Response): Promise<void> {
-   try {
-     const stats = {
-       queueSize: this.batchService.getQueueSize(),
-       isProcessing: this.batchService.isQueueProcessing()
-     };
-     
-     res.json({
-       message: 'Batch service statistics',
-       data: stats
-     });
-     
-   } catch (error) {
-     logger.error('Failed to get batch stats', { 
-       error: error instanceof Error ? error.message : 'Unknown error' 
-     });
-     res.status(500).json({ 
-       error: 'Server error',
-       message: 'Unable to get batch statistics'
-     });
-   }
- }
+  // ========== BATCH SERVICE ENDPOINTS ==========
+  async getBatchStats(req: Request, res: Response): Promise<void> {
+    try {
+      const stats = {
+        positionQueue: this.batchService.getQueueSize(),
+        positionProcessing: this.batchService.isQueueProcessing(),
+        connectionQueue: this.connectionBatchService.getQueueSize(),
+        connectionProcessing: this.connectionBatchService.isQueueProcessing()
+      };
+      
+      res.json({
+        message: 'Batch service statistics',
+        data: stats
+      });
+      
+    } catch (error) {
+      logger.error('Failed to get batch stats', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      res.status(500).json({ 
+        error: 'Server error',
+        message: 'Unable to get batch statistics'
+      });
+    }
+  }
 
- async forceFlushBatch(req: Request, res: Response): Promise<void> {
-   try {
-     await this.batchService.forceFlush();
-     
-     res.json({
-       message: 'Batch flushed successfully',
-       timestamp: new Date().toISOString()
-     });
-     
-   } catch (error) {
-     logger.error('Failed to flush batch', { 
-       error: error instanceof Error ? error.message : 'Unknown error' 
-     });
-     res.status(500).json({ 
-       error: 'Server error',
-       message: 'Unable to flush batch'
-     });
-   }
- }
+  async forceFlushBatch(req: Request, res: Response): Promise<void> {
+    try {
+      await Promise.all([
+        this.batchService.forceFlush(),
+        this.connectionBatchService.forceFlush()
+      ]);
+      
+      res.json({
+        message: 'All batches flushed successfully',
+        timestamp: new Date().toISOString()
+      });
+      
+    } catch (error) {
+      logger.error('Failed to flush batches', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      res.status(500).json({ 
+        error: 'Server error',
+        message: 'Unable to flush batches'
+      });
+    }
+  }
 
- // ========== CLEANUP ==========
- async destroy(): Promise<void> {
-   await this.batchService.destroy();
- }
+  // ========== CLEANUP ==========
+  async destroy(): Promise<void> {
+    await Promise.all([
+      this.batchService.destroy(),
+      this.connectionBatchService.destroy()
+    ]);
+  }
 }
 
 export default PlayerController;

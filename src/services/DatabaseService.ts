@@ -17,6 +17,12 @@ interface PlayerBatchUpdate {
   cityId?: number;
   timestamp: number;
 }
+interface PlayerConnectionBatchUpdate {
+  uuid: string;
+  name: string;
+  isOnline: boolean;
+  timestamp: number;
+}
 
 export class DatabaseService {
   private pool: Pool;
@@ -309,7 +315,124 @@ export class DatabaseService {
       throw new Error('Unable to fetch player');
     }
   }
+async batchUpdatePlayerConnections(connections: PlayerConnectionBatchUpdate[]): Promise<void> {
+  if (connections.length === 0) return;
 
+  const client = await this.pool.connect();
+  
+  try {
+    await client.query('BEGIN');
+
+    // Préparer les valeurs pour le batch insert/update
+    const values = connections.map((connection, index) => {
+      const baseIndex = index * 4;
+      return `($${baseIndex + 1}, $${baseIndex + 2}, $${baseIndex + 3}, $${baseIndex + 4})`;
+    }).join(',');
+
+    const flatParams = connections.flatMap(connection => [
+      connection.uuid,
+      connection.name,
+      connection.isOnline,
+      new Date(connection.timestamp)
+    ]);
+
+    const query = `
+      INSERT INTO players (
+        player_uuid, player_name, is_online, last_updated,
+        x, y, z, chunk_x, chunk_z, redis_synced
+      ) 
+      VALUES ${values.replace(/\$(\d+)/g, (match, num) => {
+        const paramNum = parseInt(num);
+        if (paramNum % 4 === 1) return `$${paramNum}`;  // uuid
+        if (paramNum % 4 === 2) return `$${paramNum}`;  // name
+        if (paramNum % 4 === 3) return `$${paramNum}`;  // is_online
+        if (paramNum % 4 === 0) return `$${paramNum}`;  // timestamp
+        return match;
+      }).replace(/\) VALUES \(/g, ', 0, 0, 0, 0, 0, false) VALUES (')}
+      ON CONFLICT (player_uuid) DO UPDATE SET
+        player_name = EXCLUDED.player_name,
+        is_online = EXCLUDED.is_online,
+        last_updated = EXCLUDED.last_updated,
+        x = CASE 
+          WHEN players.x IS NULL OR players.x = 0 THEN 0
+          ELSE players.x
+        END,
+        y = CASE 
+          WHEN players.y IS NULL OR players.y = 0 THEN 0
+          ELSE players.y
+        END,
+        z = CASE 
+          WHEN players.z IS NULL OR players.z = 0 THEN 0
+          ELSE players.z
+        END,
+        chunk_x = CASE 
+          WHEN players.chunk_x IS NULL OR players.chunk_x = 0 THEN 0
+          ELSE players.chunk_x
+        END,
+        chunk_z = CASE 
+          WHEN players.chunk_z IS NULL OR players.chunk_z = 0 THEN 0
+          ELSE players.chunk_z
+        END,
+        redis_synced = false
+    `;
+
+    // Reconstruire la requête manuellement pour les valeurs par défaut
+    const finalQuery = `
+      WITH new_values AS (
+        SELECT * FROM (VALUES ${connections.map((_, index) => {
+          const base = index * 4;
+          return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4})`;
+        }).join(',')}) AS t(player_uuid, player_name, is_online, last_updated)
+      )
+      INSERT INTO players (
+        player_uuid, player_name, is_online, last_updated,
+        x, y, z, chunk_x, chunk_z, redis_synced
+      )
+      SELECT 
+        player_uuid, player_name, is_online, last_updated,
+        0, 0, 0, 0, 0, false
+      FROM new_values
+      ON CONFLICT (player_uuid) DO UPDATE SET
+        player_name = EXCLUDED.player_name,
+        is_online = EXCLUDED.is_online,
+        last_updated = EXCLUDED.last_updated,
+        x = CASE 
+          WHEN players.x IS NULL OR players.x = 0 THEN 0
+          ELSE players.x
+        END,
+        y = CASE 
+          WHEN players.y IS NULL OR players.y = 0 THEN 0
+          ELSE players.y
+        END,
+        z = CASE 
+          WHEN players.z IS NULL OR players.z = 0 THEN 0
+          ELSE players.z
+        END,
+        chunk_x = CASE 
+          WHEN players.chunk_x IS NULL OR players.chunk_x = 0 THEN 0
+          ELSE players.chunk_x
+        END,
+        chunk_z = CASE 
+          WHEN players.chunk_z IS NULL OR players.chunk_z = 0 THEN 0
+          ELSE players.chunk_z
+        END,
+        redis_synced = false
+    `;
+
+    await client.query(finalQuery, flatParams);
+    await client.query('COMMIT');
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    logger.error('Batch update player connections failed', { 
+      error: error instanceof Error ? error.message : 'Unknown error',
+      playersCount: connections.length 
+    });
+    throw error;
+  } finally {
+    client.release();
+  }
+}
   async getPlayersInZone(zoneType: 'region' | 'node' | 'city', zoneId: number): Promise<Player[]> {
     const columnName = `${zoneType}_id`;
     const query = `
@@ -380,6 +503,8 @@ export class DatabaseService {
       throw new Error('Unable to update player position');
     }
   }
+
+  
 
   async logZoneEvent(
     playerUuid: string,
