@@ -402,8 +402,6 @@ export class ZoneSyncService {
       const promise = this.redis.cacheZoneMetadata('city', city.id, {
         name: city.name,
         description: city.description || '',
-        population: city.population,
-        max_population: city.max_population,
         node_id: city.node_id,
         is_active: city.is_active,
         created_at: city.created_at.toISOString()
@@ -711,8 +709,6 @@ await this.updateZoneMetadataCache(zoneType, zone);
         metadata = {
           name: city.name,
           description: city.description || '',
-          population: city.population,
-          max_population: city.max_population,
           node_id: city.node_id,
           is_active: city.is_active,
           created_at: city.created_at.toISOString()

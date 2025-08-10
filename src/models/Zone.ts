@@ -35,8 +35,6 @@ export const CitySchema = z.object({
   node_id: z.number().int().positive(),
   chunk_boundary: PolygonSchema,
   boundary_cache: z.string(),
-  population: z.number().int().min(0),
-  max_population: z.number().int().positive(),
   is_active: z.boolean(),
   created_at: z.date(),
   updated_at: z.date()
@@ -82,7 +80,6 @@ export interface ZoneHierarchy {
   city_id?: number;
   city_name?: string;
   city_description?: string;
-  population?: number;
   city_active?: boolean;
 }
 
