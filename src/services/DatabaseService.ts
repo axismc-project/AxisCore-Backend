@@ -284,7 +284,7 @@ export class DatabaseService {
         p.*,
         r.name as region_name,
         n.name as node_name,
-        c.name as city_name,
+        c.name as city_name
       FROM players p
       LEFT JOIN regions r ON p.region_id = r.id
       LEFT JOIN nodes n ON p.node_id = n.id
