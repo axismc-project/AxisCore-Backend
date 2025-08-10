@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { RedisService } from '../services/RedisService';
 import { DatabaseService } from '../services/DatabaseService';
 import { ZoneSyncService } from '../services/ZoneSyncService';
+import { ChunkCalculatorService } from '../services/ChunkCalculatorService';
 import { ChunkZoneDataSchema } from '../models/Zone';
 import { SecurityUtils } from '../utils/security';
 import { logger } from '../utils/logger';
@@ -10,7 +11,8 @@ export class ZoneController {
   constructor(
     private redis: RedisService,
     private db: DatabaseService,
-    private syncService: ZoneSyncService
+    private syncService: ZoneSyncService,
+    private calculator: ChunkCalculatorService
   ) {}
 
   // ========== ENDPOINTS ZONES ==========
@@ -190,6 +192,180 @@ export class ZoneController {
     }
   }
 
+  // ========== ZONE CREATION & EDITING ==========
+  async createZone(req: Request, res: Response): Promise<void> {
+    try {
+      const { zoneType } = req.params;
+      const { name, description, polygon, parentId } = req.body;
+      
+      if (!['region', 'node', 'city'].includes(zoneType)) {
+        res.status(400).json({
+          error: 'Invalid zone type',
+          message: 'Type must be: region, node, or city'
+        });
+        return;
+      }
+
+      if (!name || typeof name !== 'string' || name.length === 0 || name.length > 100) {
+        res.status(400).json({
+          error: 'Invalid name',
+          message: 'Name must be a string with 1 to 100 characters'
+        });
+        return;
+      }
+
+      if (!Array.isArray(polygon) || polygon.length < 3) {
+        res.status(400).json({
+          error: 'Invalid polygon',
+          message: 'Polygon must be an array with at least 3 points'
+        });
+        return;
+      }
+
+      // Validate polygon
+      const validation = this.calculator.validatePolygon(polygon);
+      if (!validation.valid) {
+        res.status(400).json({
+          error: 'Invalid polygon',
+          message: validation.error
+        });
+        return;
+      }
+
+      // Validate parent-child relationships
+      if (zoneType === 'node' && !parentId) {
+        res.status(400).json({
+          error: 'Missing parent',
+          message: 'Node must have a region_id'
+        });
+        return;
+      }
+
+      if (zoneType === 'city' && !parentId) {
+        res.status(400).json({
+          error: 'Missing parent', 
+          message: 'City must have a node_id'
+        });
+        return;
+      }
+
+      // Create zone
+      const newZoneId = await this.db.createZone(
+        zoneType as any, 
+        name, 
+        description || null, 
+        polygon, 
+        parentId
+      );
+
+      res.status(201).json({
+        message: 'Zone created successfully',
+        data: {
+          id: newZoneId,
+          type: zoneType,
+          name,
+          description,
+          polygon,
+          parentId,
+          polygonStats: this.calculator.getPolygonStats(polygon)
+        }
+      });
+      
+    } catch (error) {
+      logger.error('Failed to create zone', { 
+        zoneType: req.params.zoneType,
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      res.status(500).json({ 
+        error: 'Server error',
+        message: 'Unable to create zone'
+      });
+    }
+  }
+
+  async addZonePoint(req: Request, res: Response): Promise<void> {
+    try {
+      const { zoneType, zoneId } = req.params;
+      const { chunkX, chunkZ, insertAfter } = req.body;
+      
+      if (!['region', 'node', 'city'].includes(zoneType)) {
+        res.status(400).json({
+          error: 'Invalid zone type',
+          message: 'Type must be: region, node, or city'
+        });
+        return;
+      }
+      
+      const id = parseInt(zoneId);
+      if (isNaN(id) || id <= 0) {
+        res.status(400).json({
+          error: 'Invalid zone ID',
+          message: 'ID must be a positive integer'
+        });
+        return;
+      }
+      
+      if (!SecurityUtils.isValidChunkCoordinate(chunkX) || !SecurityUtils.isValidChunkCoordinate(chunkZ)) {
+        res.status(400).json({
+          error: 'Invalid chunk coordinates',
+          message: 'chunkX and chunkZ must be valid integers within bounds'
+        });
+        return;
+      }
+
+      // Get current zone
+      const zone = await this.db.getZoneById(zoneType as any, id);
+      if (!zone) {
+        res.status(404).json({
+          error: 'Zone not found',
+          message: `Zone ${zoneType}:${id} not found`
+        });
+        return;
+      }
+
+      // Add point to polygon
+      const newPolygon = [...zone.chunk_boundary];
+      const insertIndex = insertAfter !== undefined ? insertAfter + 1 : newPolygon.length;
+      newPolygon.splice(insertIndex, 0, [chunkX, chunkZ]);
+
+      // Validate new polygon
+      const validation = this.calculator.validatePolygon(newPolygon);
+      if (!validation.valid) {
+        res.status(400).json({
+          error: 'Invalid polygon',
+          message: validation.error
+        });
+        return;
+      }
+
+      // Update zone
+      await this.db.updateZonePolygon(zoneType as any, id, newPolygon);
+
+      res.json({
+        message: 'Point added successfully',
+        data: {
+          zoneType,
+          zoneId: id,
+          newPoint: [chunkX, chunkZ],
+          insertedAt: insertIndex,
+          newPolygon: newPolygon,
+          polygonStats: this.calculator.getPolygonStats(newPolygon)
+        }
+      });
+      
+    } catch (error) {
+      logger.error('Failed to add zone point', { 
+        zoneType: req.params.zoneType, 
+        zoneId: req.params.zoneId,
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      res.status(500).json({ 
+        error: 'Server error',
+        message: 'Unable to add zone point'
+      });
+    }
+  }
+
   // ========== ENDPOINTS STATISTIQUES ==========
   async getStats(req: Request, res: Response): Promise<void> {
     try {
@@ -322,4 +498,5 @@ export class ZoneController {
     return SecurityUtils.timingSafeEqual(token, validToken);
   }
 }
+
 export default ZoneController;
