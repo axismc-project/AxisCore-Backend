@@ -76,6 +76,8 @@ export class RedisConfig {
     return RedisConfig.subscriber;
   }
 
+  
+
   static async closeAll(): Promise<void> {
     const promises: Promise<void>[] = [];
 

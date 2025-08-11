@@ -67,11 +67,11 @@ class Application {
       // ✅ Create batch service before sync service
       this.batchService = new DatabaseBatchService(this.dbService);
       
-      this.syncService = new ZoneSyncService(
+     this.syncService = new ZoneSyncService(
         this.dbService,
         this.redisService,
         this.calculatorService,
-        this.batchService // ✅ Pass batch service for async DB updates
+        this.batchService
       );
       
       logger.info('✅ Services initialized successfully');

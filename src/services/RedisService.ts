@@ -44,6 +44,129 @@ export class RedisService {
     return this.subscriber;
   }
 
+  // ========== REDIS BASIC OPERATIONS ==========
+  async setex(key: string, seconds: number, value: string): Promise<void> {
+    const client = this.getClient();
+    
+    try {
+      await client.setEx(key, seconds, value);
+    } catch (error) {
+      logger.error('Failed to setex', { 
+        key, 
+        seconds, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to set key with expiration');
+    }
+  }
+
+  async get(key: string): Promise<string | null> {
+    const client = this.getClient();
+    
+    try {
+      return await client.get(key);
+    } catch (error) {
+      logger.error('Failed to get key', { 
+        key, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to get key');
+    }
+  }
+
+  async del(key: string | string[]): Promise<number> {
+    const client = this.getClient();
+    
+    try {
+      return await client.del(key);
+    } catch (error) {
+      logger.error('Failed to delete key(s)', { 
+        key, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to delete key(s)');
+    }
+  }
+
+  async keys(pattern: string): Promise<string[]> {
+    const client = this.getClient();
+    
+    try {
+      return await client.keys(pattern);
+    } catch (error) {
+      logger.error('Failed to get Redis keys', { 
+        pattern, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to get Redis keys');
+    }
+  }
+
+  async hSet(key: string, field: string | Record<string, string>, value?: string): Promise<number> {
+    const client = this.getClient();
+    
+    try {
+      if (typeof field === 'string' && value !== undefined) {
+        return await client.hSet(key, field, value);
+      } else if (typeof field === 'object') {
+        return await client.hSet(key, field);
+      } else {
+        throw new Error('Invalid hSet parameters');
+      }
+    } catch (error) {
+      logger.error('Failed to hSet', { 
+        key, 
+        field, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to set hash field');
+    }
+  }
+
+  async hGet(key: string, field: string): Promise<string | undefined> {
+    const client = this.getClient();
+    
+    try {
+      return await client.hGet(key, field);
+    } catch (error) {
+      logger.error('Failed to hGet', { 
+        key, 
+        field, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to get hash field');
+    }
+  }
+
+  async hGetAll(key: string): Promise<Record<string, string>> {
+    const client = this.getClient();
+    
+    try {
+      return await client.hGetAll(key);
+    } catch (error) {
+      logger.error('Failed to hGetAll', { 
+        key, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to get hash');
+    }
+  }
+
+  async expire(key: string, seconds: number): Promise<boolean> {
+    const client = this.getClient();
+    
+    try {
+      return await client.expire(key, seconds);
+    } catch (error) {
+      logger.error('Failed to set expiration', { 
+        key, 
+        seconds, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to set key expiration');
+    }
+  }
+
   // ========== GESTION CHUNKS ==========
   async setChunkZone(chunkX: number, chunkZ: number, zoneData: ChunkZoneData): Promise<void> {
     if (!SecurityUtils.isValidChunkCoordinate(chunkX) || !SecurityUtils.isValidChunkCoordinate(chunkZ)) {
@@ -51,7 +174,6 @@ export class RedisService {
     }
 
     const key = `chunk:zone:${chunkX}:${chunkZ}`;
-    const client = this.getClient();
     
     try {
       const data: Record<string, string> = {
@@ -63,8 +185,8 @@ export class RedisService {
         city_name: zoneData.cityName || ''
       };
 
-      await client.hSet(key, data);
-      await client.expire(key, parseInt(process.env.CACHE_TTL_CHUNKS || '86400'));
+      await this.hSet(key, data);
+      await this.expire(key, parseInt(process.env.CACHE_TTL_CHUNKS || '86400'));
     } catch (error) {
       logger.error('Failed to set chunk zone', { 
         chunkX, 
@@ -77,10 +199,9 @@ export class RedisService {
 
   async getChunkZone(chunkX: number, chunkZ: number): Promise<ChunkZoneData | null> {
     const key = `chunk:zone:${chunkX}:${chunkZ}`;
-    const client = this.getClient();
     
     try {
-      const data = await client.hGetAll(key);
+      const data = await this.hGetAll(key);
       
       if (Object.keys(data).length === 0) {
         return null;
@@ -106,10 +227,9 @@ export class RedisService {
 
   async deleteChunkZone(chunkX: number, chunkZ: number): Promise<void> {
     const key = `chunk:zone:${chunkX}:${chunkZ}`;
-    const client = this.getClient();
     
     try {
-      await client.del(key);
+      await this.del(key);
     } catch (error) {
       logger.error('Failed to delete chunk zone', { 
         chunkX, 
@@ -124,11 +244,9 @@ export class RedisService {
     if (!SecurityUtils.isValidRedisPattern(pattern)) {
       throw new Error('Invalid Redis pattern');
     }
-
-    const client = this.getClient();
     
     try {
-      const keys = await client.keys(pattern);
+      const keys = await this.keys(pattern);
       if (keys.length === 0) return 0;
       
       // Process in batches to avoid overloading Redis
@@ -137,7 +255,7 @@ export class RedisService {
       
       for (let i = 0; i < keys.length; i += batchSize) {
         const batch = keys.slice(i, i + batchSize);
-        await client.del(batch);
+        await this.del(batch);
         deletedCount += batch.length;
       }
       
@@ -152,21 +270,6 @@ export class RedisService {
     }
   }
 
-  // ========== REDIS KEYS (ajout pour keyspace notifications) ==========
-  async keys(pattern: string): Promise<string[]> {
-    const client = this.getClient();
-    
-    try {
-      return await client.keys(pattern);
-    } catch (error) {
-      logger.error('Failed to get Redis keys', { 
-        pattern, 
-        error: error instanceof Error ? error.message : 'Unknown error' 
-      });
-      throw new Error('Unable to get Redis keys');
-    }
-  }
-
   // ========== POSITIONS JOUEURS ==========
   async setPlayerPosition(uuid: string, position: PlayerPosition): Promise<void> {
     if (!SecurityUtils.isValidUUID(uuid)) {
@@ -174,7 +277,6 @@ export class RedisService {
     }
 
     const key = `player:pos:${uuid}`;
-    const client = this.getClient();
     
     try {
       const data: Record<string, string> = {
@@ -186,8 +288,8 @@ export class RedisService {
         timestamp: position.timestamp.toString()
       };
 
-      await client.hSet(key, data);
-      await client.expire(key, parseInt(process.env.CACHE_TTL_CHUNKS || '86400'));
+      await this.hSet(key, data);
+      await this.expire(key, parseInt(process.env.CACHE_TTL_CHUNKS || '86400'));
     } catch (error) {
       logger.error('Failed to set player position', { 
         uuid, 
@@ -207,7 +309,6 @@ export class RedisService {
     }
 
     const key = `player:chunk:${uuid}`;
-    const client = this.getClient();
     
     try {
       const data: Record<string, string> = {
@@ -216,8 +317,8 @@ export class RedisService {
         timestamp: Date.now().toString()
       };
 
-      await client.hSet(key, data);
-      await client.expire(key, parseInt(process.env.CACHE_TTL_CHUNKS || '86400'));
+      await this.hSet(key, data);
+      await this.expire(key, parseInt(process.env.CACHE_TTL_CHUNKS || '86400'));
     } catch (error) {
       logger.error('Failed to set player chunk', { 
         uuid, 
@@ -231,10 +332,9 @@ export class RedisService {
 
   async getPlayerPosition(uuid: string): Promise<PlayerPosition | null> {
     const key = `player:pos:${uuid}`;
-    const client = this.getClient();
     
     try {
-      const data = await client.hGetAll(key);
+      const data = await this.hGetAll(key);
       
       if (Object.keys(data).length === 0) {
         return null;
@@ -270,10 +370,9 @@ export class RedisService {
 
   async getPlayerChunk(uuid: string): Promise<{ chunk_x: number; chunk_z: number; timestamp: number } | null> {
     const key = `player:chunk:${uuid}`;
-    const client = this.getClient();
     
     try {
-      const data = await client.hGetAll(key);
+      const data = await this.hGetAll(key);
       
       if (Object.keys(data).length === 0) {
         return null;
@@ -303,7 +402,6 @@ export class RedisService {
 
   async setPlayerZones(uuid: string, zones: PlayerZones): Promise<void> {
     const key = `player:zones:${uuid}`;
-    const client = this.getClient();
     
     try {
       const data: Record<string, string> = {
@@ -314,8 +412,8 @@ export class RedisService {
       if (zones.node_id !== undefined) data.node_id = zones.node_id.toString();
       if (zones.city_id !== undefined) data.city_id = zones.city_id.toString();
 
-      await client.hSet(key, data);
-      await client.expire(key, parseInt(process.env.CACHE_TTL_CHUNKS || '86400'));
+      await this.hSet(key, data);
+      await this.expire(key, parseInt(process.env.CACHE_TTL_CHUNKS || '86400'));
     } catch (error) {
       logger.error('Failed to set player zones', { 
         uuid, 
@@ -327,10 +425,9 @@ export class RedisService {
 
   async getPlayerZones(uuid: string): Promise<PlayerZones | null> {
     const key = `player:zones:${uuid}`;
-    const client = this.getClient();
     
     try {
-      const data = await client.hGetAll(key);
+      const data = await this.hGetAll(key);
       
       if (Object.keys(data).length === 0) {
         return null;
@@ -388,7 +485,7 @@ export class RedisService {
     
     try {
       await client.sAdd(key, uuid);
-      await client.expire(key, parseInt(process.env.CACHE_TTL_ZONES || '3600'));
+      await this.expire(key, parseInt(process.env.CACHE_TTL_ZONES || '3600'));
     } catch (error) {
       logger.error('Failed to add player to zone', { 
         zoneType, 
@@ -436,7 +533,6 @@ export class RedisService {
   // ========== CACHE MÉTADONNÉES ZONES ==========
   async cacheZoneMetadata(zoneType: 'region' | 'node' | 'city', id: number, data: Record<string, any>): Promise<void> {
     const key = `zone:${zoneType}:${id}`;
-    const client = this.getClient();
     
     try {
       const stringData: Record<string, string> = {};
@@ -444,8 +540,8 @@ export class RedisService {
         stringData[k] = v?.toString() || '';
       }
 
-      await client.hSet(key, stringData);
-      await client.expire(key, parseInt(process.env.CACHE_TTL_ZONES || '3600'));
+      await this.hSet(key, stringData);
+      await this.expire(key, parseInt(process.env.CACHE_TTL_ZONES || '3600'));
     } catch (error) {
       logger.error('Failed to cache zone metadata', { 
         zoneType, 
@@ -458,10 +554,9 @@ export class RedisService {
 
   async getZoneMetadata(zoneType: 'region' | 'node' | 'city', id: number): Promise<Record<string, string> | null> {
     const key = `zone:${zoneType}:${id}`;
-    const client = this.getClient();
     
     try {
-      const data = await client.hGetAll(key);
+      const data = await this.hGetAll(key);
       return Object.keys(data).length > 0 ? data : null;
     } catch (error) {
       logger.error('Failed to get zone metadata', { 
@@ -474,15 +569,13 @@ export class RedisService {
   }
 
   async invalidateZoneCache(zoneType: 'region' | 'node' | 'city', id: number): Promise<void> {
-    const client = this.getClient();
-    
     try {
       const keys = [
         `zone:${zoneType}:${id}`,
         `zone:${zoneType}:${id}:players`
       ];
       
-      await client.del(keys);
+      await this.del(keys);
     } catch (error) {
       logger.error('Failed to invalidate zone cache', { 
         zoneType, 
@@ -630,13 +723,11 @@ export class RedisService {
     memoryUsage: string;
     connectionStatus: string;
   }> {
-    const client = this.getClient();
-    
     try {
       const [playerKeys, chunkKeys, memoryInfo] = await Promise.all([
-        client.keys('player:pos:*'),
-        client.keys('chunk:zone:*'),
-        client.info('memory')
+        this.keys('player:pos:*'),
+        this.keys('chunk:zone:*'),
+        this.getClient().info('memory')
       ]);
 
       return {
@@ -673,7 +764,6 @@ export class RedisService {
     deletedPlayers: number;
     deletedChunks: number;
   }> {
-    const client = this.getClient();
     const now = Date.now();
     const maxAge = 24 * 60 * 60 * 1000; // 24 hours
     
@@ -682,13 +772,13 @@ export class RedisService {
     
     try {
       // Clean expired player positions
-      const playerKeys = await client.keys('player:pos:*');
+      const playerKeys = await this.keys('player:pos:*');
       
       for (const key of playerKeys) {
         try {
-          const timestamp = await client.hGet(key, 'timestamp');
+          const timestamp = await this.hGet(key, 'timestamp');
           if (timestamp && (now - parseInt(timestamp)) > maxAge) {
-            await client.del(key);
+            await this.del(key);
             deletedPlayers++;
           }
         } catch (error) {
@@ -697,13 +787,13 @@ export class RedisService {
       }
 
       // Clean expired player zones
-      const zoneKeys = await client.keys('player:zones:*');
+      const zoneKeys = await this.keys('player:zones:*');
       
       for (const key of zoneKeys) {
         try {
-          const lastUpdate = await client.hGet(key, 'last_update');
+          const lastUpdate = await this.hGet(key, 'last_update');
           if (lastUpdate && (now - parseInt(lastUpdate)) > maxAge) {
-            await client.del(key);
+            await this.del(key);
             deletedZones++;
           }
         } catch (error) {

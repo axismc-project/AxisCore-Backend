@@ -583,6 +583,22 @@ const finalQuery = `
     }
   }
 
+  // Ajouter ces méthodes à la classe DatabaseService existante :
+
+// ========== QUERY EXECUTION ==========
+async executeQuery(query: string, params?: any[]): Promise<any> {
+  try {
+    const result = await this.pool.query(query, params);
+    return result;
+  } catch (error) {
+    logger.error('Database query failed', { 
+      query: query.substring(0, 100) + '...', 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
+    throw new Error('Database query execution failed');
+  }
+}
+
   // ========== DIAGNOSTICS ==========
   async checkDatabaseIntegrity(): Promise<{
     regionsWithInvalidJson: number;

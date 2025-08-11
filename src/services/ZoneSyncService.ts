@@ -1,71 +1,111 @@
 import { RedisService } from './RedisService';
 import { DatabaseService } from './DatabaseService';
+import { ChunkCalculatorService } from './ChunkCalculatorService';
+import { DatabaseBatchService } from './DatabaseBatchService';
+import { Region, Node, City, ChunkZoneData } from '../models/Zone';
 import { logger } from '../utils/logger';
 
-interface ZoneData {
-  id: number;
-  name: string;
-  chunk_boundary: [number, number][];
-  boundary_cache: [number, number][];
-  is_active: boolean;
-  type: 'region' | 'node' | 'city';
-  region_id?: number;
-  node_id?: number;
+interface ZoneSyncStats {
+  isReady: boolean;
+  lastSyncTime: Date | null;
+  syncInProgress: boolean;
+  zonesLoaded: number;
+  chunksProcessed: number;
+  errors: number;
+  performance: {
+    lastSyncDuration: number;
+    averageChunkTime: number;
+  };
 }
 
-interface BoundingBox {
-  minX: number;
-  maxX: number;
-  minZ: number;
-  maxZ: number;
-}
-
-interface ChunkZoneData {
-  regionId?: number;
-  regionName?: string;
-  nodeId?: number;
-  nodeName?: string;
-  cityId?: number;
-  cityName?: string;
+interface HealthStatus {
+  isHealthy: boolean;
+  lastSync: Date | null;
+  syncInProgress: boolean;
+  issues: string[];
+  services: {
+    redis: boolean;
+    database: boolean;
+    calculator: boolean;
+  };
 }
 
 export class ZoneSyncService {
-  private redisService: RedisService;
-  private databaseService: DatabaseService;
-  private allZones: ZoneData[] = [];
-  private chunkCache: Map<string, ChunkZoneData> = new Map();
-  private isInitialized = false;
+  // ✅ FIX: Renommer la propriété privée pour éviter le conflit
+  private serviceReady = false;
+  private lastSyncTime: Date | null = null;
   private syncInProgress = false;
+  private postgresListener: any = null;
+  private keyspaceListener: boolean = false;
+  
+  // Cached data
+  private regions: Region[] = [];
+  private nodes: Node[] = [];
+  private cities: City[] = [];
+  
+  // Statistics
+  private stats: ZoneSyncStats = {
+    isReady: false,
+    lastSyncTime: null,
+    syncInProgress: false,
+    zonesLoaded: 0,
+    chunksProcessed: 0,
+    errors: 0,
+    performance: {
+      lastSyncDuration: 0,
+      averageChunkTime: 0
+    }
+  };
 
-  constructor(redisService: RedisService, databaseService: DatabaseService) {
-    this.redisService = redisService;
-    this.databaseService = databaseService;
+  constructor(
+    private databaseService: DatabaseService,
+    private redisService: RedisService,
+    private calculatorService?: ChunkCalculatorService,
+    private batchService?: DatabaseBatchService
+  ) {
+    logger.info('🚀 ZoneSyncService constructor initialized');
   }
 
-  /**
-   * Initialise le service et effectue la synchronisation complète
-   */
-  async initialize(): Promise<void> {
-    if (this.isInitialized) {
-      logger.warn('Zone sync service already initialized');
+  // ========== INITIALIZATION ==========
+  async init(): Promise<void> {
+    if (this.serviceReady) {
+      logger.warn('ZoneSyncService already initialized');
       return;
     }
 
-    logger.info('🚀 Initializing REAL-TIME zone sync service');
-
     try {
+      logger.info('🚀 Initializing ZoneSyncService with REAL-TIME capabilities');
+      
+      // 1. Perform initial zone synchronization
       await this.performFullSync();
-      this.isInitialized = true;
-      logger.info('✅ Zone sync service initialized successfully');
+      
+      // 2. Set up PostgreSQL listener for zone changes
+      await this.setupPostgresListener();
+      
+      // 3. Set up Redis keyspace notifications for player positions
+      await this.setupRedisKeyspaceListener();
+      
+      // 4. Mark as ready
+      this.serviceReady = true;
+      this.lastSyncTime = new Date();
+      this.updateStats();
+      
+      logger.info('✅ ZoneSyncService initialized successfully', {
+        regions: this.regions.length,
+        nodes: this.nodes.length,
+        cities: this.cities.length,
+        chunksProcessed: this.stats.chunksProcessed
+      });
     } catch (error) {
-      logger.error('Failed to initialize zone sync service', { error });
+      logger.error('❌ Failed to initialize ZoneSyncService', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      this.serviceReady = false;
       throw error;
     }
   }
 
-  /**
-   * Effectue une synchronisation complète
-   */
+  // ========== CORE SYNC METHODS ==========
   async performFullSync(): Promise<void> {
     if (this.syncInProgress) {
       logger.warn('Sync already in progress, skipping');
@@ -74,420 +114,654 @@ export class ZoneSyncService {
 
     this.syncInProgress = true;
     const startTime = Date.now();
+    let chunksProcessed = 0;
+    let errors = 0;
 
     try {
-      logger.info('Starting full synchronization');
+      logger.info('🔄 Starting full zone synchronization');
 
-      // 1. Charger toutes les zones depuis la base
+      // 1. Load all zones from database
       await this.loadZonesFromDatabase();
 
-      // 2. Valider les données des zones
+      // 2. Validate zone data
       this.validateZoneData();
 
-      // 3. Calculer les chunks pour toutes les zones
-      await this.computeAllChunks();
+      // 3. Pre-calculate and cache chunk zones
+      if (this.calculatorService) {
+        chunksProcessed = await this.preCalculateAllChunks();
+      } else {
+        logger.warn('Calculator service not available, skipping chunk pre-calculation');
+      }
 
-      // 4. Mettre en cache les métadonnées des zones
+      // 4. Cache zone metadata in Redis
       await this.cacheZoneMetadata();
 
       const duration = Date.now() - startTime;
-      const chunksCount = this.chunkCache.size;
-
-      logger.info('Full synchronization completed', {
+      
+      logger.info('✅ Full synchronization completed successfully', {
         durationMs: duration,
-        chunksProcessed: chunksCount,
-        errors: 0,
-        zonesCount: this.allZones.length
+        regions: this.regions.length,
+        nodes: this.nodes.length,
+        cities: this.cities.length,
+        chunksProcessed,
+        errors,
+        performance: {
+          avgTimePerChunk: chunksProcessed > 0 ? Math.round(duration / chunksProcessed * 100) / 100 : 0
+        }
       });
 
-      logger.info('✅ Full sync completed - continuing...');
+      // Update statistics
+      this.stats.performance.lastSyncDuration = duration;
+      this.stats.chunksProcessed = chunksProcessed;
+      this.stats.errors = errors;
+      this.stats.performance.averageChunkTime = chunksProcessed > 0 ? duration / chunksProcessed : 0;
 
     } catch (error) {
-      logger.error('Full synchronization failed', { error });
+      errors++;
+      this.stats.errors = errors;
+      logger.error('❌ Full synchronization failed', { 
+        error: error instanceof Error ? error.message : 'Unknown error',
+        duration: Date.now() - startTime
+      });
       throw error;
     } finally {
       this.syncInProgress = false;
+      this.lastSyncTime = new Date();
+      this.updateStats();
     }
   }
 
-  /**
-   * Charge toutes les zones depuis la base de données
-   */
-// Remplacer les méthodes query par les bonnes méthodes
-private async loadZonesFromDatabase(): Promise<void> {
-  try {
-    const [regions, nodes, cities] = await Promise.all([
-      this.databaseService.executeQuery('SELECT id, name, chunk_boundary, boundary_cache, is_active FROM regions WHERE is_active = true'),
-      this.databaseService.executeQuery('SELECT id, name, region_id, chunk_boundary, boundary_cache, is_active FROM nodes WHERE is_active = true'),
-      this.databaseService.executeQuery('SELECT id, name, node_id, chunk_boundary, boundary_cache, is_active FROM cities WHERE is_active = true')
-    ]);
+  private async loadZonesFromDatabase(): Promise<void> {
+    try {
+      logger.info('📊 Loading zones from database');
 
-    // Convertir et typer les données avec types explicites
-    this.allZones = [
-      ...regions.rows.map((r: any) => ({ ...r, type: 'region' as const })),
-      ...nodes.rows.map((n: any) => ({ ...n, type: 'node' as const })),
-      ...cities.rows.map((c: any) => ({ ...c, type: 'city' as const }))
-    ];
+      const [regions, nodes, cities] = await Promise.all([
+        this.databaseService.getAllRegions(),
+        this.databaseService.getAllNodes(),
+        this.databaseService.getAllCities()
+      ]);
 
-    logger.info('Loaded zones from database', {
-      regions: regions.rows.length,
-      nodes: nodes.rows.length,
-      cities: cities.rows.length
-    });
+      this.regions = regions;
+      this.nodes = nodes;
+      this.cities = cities;
 
-  } catch (error) {
-    logger.error('Failed to load zones from database', { error });
-    throw error;
-  }
-}
-
-  /**
-   * Valide les données des zones
-   */
-  private validateZoneData(): void {
-    logger.info('Validating zone data');
-    
-    let invalidCount = 0;
-    
-    this.allZones = this.allZones.filter(zone => {
-      // Vérifier chunk_boundary
-      if (!zone.chunk_boundary || !Array.isArray(zone.chunk_boundary)) {
-        logger.warn(`Zone ${zone.name} has invalid chunk_boundary - not an array`);
-        invalidCount++;
-        return false;
-      }
-
-      // Vérifier qu'il y a au moins 3 points pour former un polygone
-      if (zone.chunk_boundary.length < 3) {
-        logger.warn(`Zone ${zone.name} has insufficient points in chunk_boundary: ${zone.chunk_boundary.length}`);
-        invalidCount++;
-        return false;
-      }
-
-      // Vérifier que tous les points sont valides
-      const hasInvalidPoints = zone.chunk_boundary.some((point, index) => {
-        if (!Array.isArray(point)) {
-          logger.warn(`Zone ${zone.name} point ${index} is not an array: ${typeof point}`);
-          return true;
-        }
-        if (point.length !== 2) {
-          logger.warn(`Zone ${zone.name} point ${index} does not have 2 coordinates: ${point.length}`);
-          return true;
-        }
-        if (typeof point[0] !== 'number' || typeof point[1] !== 'number') {
-          logger.warn(`Zone ${zone.name} point ${index} has non-numeric coordinates: [${typeof point[0]}, ${typeof point[1]}]`);
-          return true;
-        }
-        if (!isFinite(point[0]) || !isFinite(point[1])) {
-          logger.warn(`Zone ${zone.name} point ${index} has infinite coordinates: [${point[0]}, ${point[1]}]`);
-          return true;
-        }
-        return false;
+      logger.info('✅ Zones loaded from database', {
+        regions: regions.length,
+        nodes: nodes.length,
+        cities: cities.length,
+        totalZones: regions.length + nodes.length + cities.length
       });
 
-      if (hasInvalidPoints) {
-        invalidCount++;
+    } catch (error) {
+      logger.error('❌ Failed to load zones from database', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw new Error('Unable to load zones from database');
+    }
+  }
+
+  private validateZoneData(): void {
+    logger.info('🔍 Validating zone data');
+    
+    let invalidCount = 0;
+    const originalCount = this.regions.length + this.nodes.length + this.cities.length;
+
+    // Validate regions
+    this.regions = this.regions.filter(region => {
+      const isValid = this.validateZonePolygon(region, 'region');
+      if (!isValid) invalidCount++;
+      return isValid;
+    });
+
+    // Validate nodes
+    this.nodes = this.nodes.filter(node => {
+      const isValid = this.validateZonePolygon(node, 'node');
+      if (!isValid) invalidCount++;
+      return isValid;
+    });
+
+    // Validate cities
+    this.cities = this.cities.filter(city => {
+      const isValid = this.validateZonePolygon(city, 'city');
+      if (!isValid) invalidCount++;
+      return isValid;
+    });
+
+    const validCount = this.regions.length + this.nodes.length + this.cities.length;
+
+    if (invalidCount > 0) {
+      logger.warn(`⚠️ Filtered out ${invalidCount} invalid zones`, {
+        originalCount,
+        validCount,
+        invalidCount
+      });
+    }
+
+    logger.info('✅ Zone data validation completed', {
+      validRegions: this.regions.length,
+      validNodes: this.nodes.length,
+      validCities: this.cities.length,
+      invalidFiltered: invalidCount
+    });
+  }
+
+  private validateZonePolygon(zone: any, zoneType: string): boolean {
+    try {
+      // Check if chunk_boundary exists and is array
+      if (!zone.chunk_boundary || !Array.isArray(zone.chunk_boundary)) {
+        logger.warn(`${zoneType} ${zone.name} has invalid chunk_boundary - not an array`);
         return false;
+      }
+
+      // Check minimum points for polygon
+      if (zone.chunk_boundary.length < 3) {
+        logger.warn(`${zoneType} ${zone.name} has insufficient points: ${zone.chunk_boundary.length}`);
+        return false;
+      }
+
+      // Validate each point
+      for (let i = 0; i < zone.chunk_boundary.length; i++) {
+        const point = zone.chunk_boundary[i];
+        
+        if (!Array.isArray(point) || point.length !== 2) {
+          logger.warn(`${zoneType} ${zone.name} point ${i} is invalid format`);
+          return false;
+        }
+
+        const [x, z] = point;
+        if (typeof x !== 'number' || typeof z !== 'number' || !isFinite(x) || !isFinite(z)) {
+          logger.warn(`${zoneType} ${zone.name} point ${i} has invalid coordinates: [${x}, ${z}]`);
+          return false;
+        }
       }
 
       return true;
-    });
-
-    if (invalidCount > 0) {
-      logger.warn(`Filtered out ${invalidCount} invalid zones`);
+    } catch (error) {
+      logger.warn(`${zoneType} ${zone.name} validation error: ${error}`);
+      return false;
     }
-
-    logger.info('Zone data validation completed successfully');
   }
 
-  /**
-   * Calcule les chunks pour toutes les zones
-   */
-  private async computeAllChunks(): Promise<void> {
-    logger.info('🔄 NEW ZoneSyncService - Starting chunk computation for zones', {
-      regionsCount: this.allZones.filter(z => z.type === 'region').length,
-      nodesCount: this.allZones.filter(z => z.type === 'node').length,
-      citiesCount: this.allZones.filter(z => z.type === 'city').length
-    });
+  private async preCalculateAllChunks(): Promise<number> {
+    if (!this.calculatorService) {
+      logger.warn('Calculator service not available');
+      return 0;
+    }
 
-    this.chunkCache.clear();
+    logger.info('🧮 Starting chunk pre-calculation for all zones');
+
     let totalChunks = 0;
-    let errors = 0;
+    const batchSize = 500; // Process chunks in batches
 
-    for (const zone of this.allZones) {
-      try {
-        logger.debug(`Computing chunks for zone: ${zone.name} (${zone.type})`);
-        
-        const chunks = this.computeChunksForZone(zone);
-        totalChunks += chunks.size;
-
-        logger.debug(`Zone ${zone.name} contains ${chunks.size} chunks`);
-
-        // Ajouter les chunks au cache
-        for (const chunkKey of chunks) {
-          const existing = this.chunkCache.get(chunkKey) || {};
+    try {
+      // Process each region and its contained zones
+      for (const region of this.regions) {
+        try {
+          const regionChunks = this.calculatorService.getChunksInPolygon(region.chunk_boundary);
           
-          if (zone.type === 'region') {
-            existing.regionId = zone.id;
-            existing.regionName = zone.name;
-          } else if (zone.type === 'node') {
-            existing.nodeId = zone.id;
-            existing.nodeName = zone.name;
-          } else if (zone.type === 'city') {
-            existing.cityId = zone.id;
-            existing.cityName = zone.name;
+          // Process chunks in batches
+          for (let i = 0; i < regionChunks.length; i += batchSize) {
+            const batch = regionChunks.slice(i, i + batchSize);
+            
+            const batchPromises = batch.map(async (chunk) => {
+              try {
+                const zoneData = this.calculatorService!.calculateChunkZones(
+                  chunk.x, chunk.z, 
+                  this.regions, this.nodes, this.cities
+                );
+
+                if (zoneData.regionId || zoneData.nodeId || zoneData.cityId) {
+                  await this.redisService.setChunkZone(chunk.x, chunk.z, zoneData);
+                  return 1;
+                }
+                return 0;
+              } catch (error) {
+                logger.debug(`Failed to process chunk ${chunk.x},${chunk.z}`, { error });
+                return 0;
+              }
+            });
+
+            const batchResults = await Promise.allSettled(batchPromises);
+            const batchCount = batchResults
+              .filter(result => result.status === 'fulfilled')
+              .reduce((sum, result) => sum + (result as PromiseFulfilledResult<number>).value, 0);
+
+            totalChunks += batchCount;
+
+            // Log progress for large regions
+            if (i % (batchSize * 10) === 0 && regionChunks.length > batchSize * 10) {
+              logger.debug(`Region ${region.name}: processed ${i + batch.length}/${regionChunks.length} chunks`);
+            }
           }
 
-          this.chunkCache.set(chunkKey, existing);
-        }
+          logger.debug(`Region ${region.name}: ${regionChunks.length} chunks processed`);
 
-      } catch (error) {
-        errors++;
-        logger.error(`Failed to compute chunks for zone ${zone.name}`, { 
-          error: error instanceof Error ? error.message : String(error),
-          zone: zone.name,
-          zoneType: zone.type
-        });
-      }
-    }
-
-    logger.info('Chunk pre-computation completed', {
-      chunksProcessed: totalChunks,
-      errors: errors,
-      uniqueChunks: this.chunkCache.size
-    });
-
-    if (errors > 0) {
-      logger.warn('Chunk processing completed with errors', {
-        errors: errors,
-        totalProcessed: totalChunks
-      });
-    }
-  }
-
-  /**
-   * Calcule les chunks pour une zone spécifique
-   */
-  private computeChunksForZone(zone: ZoneData): Set<string> {
-    const chunks = new Set<string>();
-    const polygon = zone.chunk_boundary;
-
-    try {
-      // Calculer la bounding box pour optimiser
-      const bounds = this.getBoundingBox(polygon);
-      
-      logger.debug(`Zone ${zone.name} bounding box:`, bounds);
-      
-      // Limiter la zone de calcul pour éviter les chunks trop éloignés
-      const MAX_CHUNK_DISTANCE = 2000; // ±32000 blocs
-      const originalBounds = { ...bounds };
-      
-      bounds.minX = Math.max(bounds.minX, -MAX_CHUNK_DISTANCE);
-      bounds.maxX = Math.min(bounds.maxX, MAX_CHUNK_DISTANCE);
-      bounds.minZ = Math.max(bounds.minZ, -MAX_CHUNK_DISTANCE);
-      bounds.maxZ = Math.min(bounds.maxZ, MAX_CHUNK_DISTANCE);
-
-      if (bounds.minX !== originalBounds.minX || bounds.maxX !== originalBounds.maxX ||
-          bounds.minZ !== originalBounds.minZ || bounds.maxZ !== originalBounds.maxZ) {
-        logger.debug(`Zone ${zone.name} bounds clamped from [${originalBounds.minX},${originalBounds.minZ}] to [${originalBounds.maxX},${originalBounds.maxZ}] -> [${bounds.minX},${bounds.minZ}] to [${bounds.maxX},${bounds.maxZ}]`);
-      }
-
-      // Calculer le nombre de chunks à tester
-      const chunksToTest = (bounds.maxX - bounds.minX + 1) * (bounds.maxZ - bounds.minZ + 1);
-      logger.debug(`Zone ${zone.name} will test ${chunksToTest} chunks`);
-
-      // Tester chaque chunk dans la bounding box
-      for (let chunkX = bounds.minX; chunkX <= bounds.maxX; chunkX++) {
-        for (let chunkZ = bounds.minZ; chunkZ <= bounds.maxZ; chunkZ++) {
-          if (this.isPointInPolygon([chunkX, chunkZ], polygon)) {
-            chunks.add(`${chunkX},${chunkZ}`);
-          }
+        } catch (error) {
+          logger.error(`Failed to process region ${region.name}`, { 
+            regionId: region.id,
+            error: error instanceof Error ? error.message : 'Unknown error' 
+          });
         }
       }
 
-      return chunks;
-
-    } catch (error) {
-      logger.error(`Error computing chunks for zone ${zone.name}:`, {
-        error: error instanceof Error ? error.message : String(error),
-        polygonLength: polygon.length
-      });
-      return new Set();
-    }
-  }
-
-  /**
-   * Calcule la bounding box d'un polygone
-   */
-  private getBoundingBox(polygon: [number, number][]): BoundingBox {
-    if (polygon.length === 0) {
-      throw new Error('Cannot compute bounding box of empty polygon');
-    }
-
-    let minX = polygon[0][0];
-    let maxX = polygon[0][0];
-    let minZ = polygon[0][1];
-    let maxZ = polygon[0][1];
-
-    for (let i = 1; i < polygon.length; i++) {
-      const [x, z] = polygon[i];
-      minX = Math.min(minX, x);
-      maxX = Math.max(maxX, x);
-      minZ = Math.min(minZ, z);
-      maxZ = Math.max(maxZ, z);
-    }
-
-    return { minX, maxX, minZ, maxZ };
-  }
-
-  /**
-   * Algorithme point-in-polygon (Ray casting)
-   */
-  private isPointInPolygon(point: [number, number], polygon: [number, number][]): boolean {
-    const [x, y] = point;
-    let inside = false;
-
-    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-      const [xi, yi] = polygon[i];
-      const [xj, yj] = polygon[j];
-
-      if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) {
-        inside = !inside;
-      }
-    }
-
-    return inside;
-  }
-
-  /**
-   * Met en cache les métadonnées des zones dans Redis
-   */
-  private async cacheZoneMetadata(): Promise<void> {
-    logger.info('Caching zone metadata');
-
-    try {
-      // Préparer les données pour Redis
-      const zoneMetadata = {
-        regions: this.allZones.filter(z => z.type === 'region').map(z => ({
-          id: z.id,
-          name: z.name
-        })),
-        nodes: this.allZones.filter(z => z.type === 'node').map(z => ({
-          id: z.id,
-          name: z.name,
-          region_id: z.region_id
-        })),
-        cities: this.allZones.filter(z => z.type === 'city').map(z => ({
-          id: z.id,
-          name: z.name,
-          node_id: z.node_id
-        })),
-        lastUpdate: new Date().toISOString(),
-        totalChunks: this.chunkCache.size
-      };
-
-      // Stocker dans Redis avec expiration de 24h
-      await this.redisService.setex('zones:metadata', 86400, JSON.stringify(zoneMetadata));
-
-      // Stocker également un index des chunks pour accès rapide
-      const chunkIndex: Record<string, ChunkZoneData> = {};
-      for (const [chunkKey, zoneData] of this.chunkCache.entries()) {
-        chunkIndex[chunkKey] = zoneData;
-      }
-
-      await this.redisService.setex('zones:chunks', 86400, JSON.stringify(chunkIndex));
-
-      logger.info('Zone metadata cached successfully', {
-        zonesCount: this.allZones.length
+      logger.info('✅ Chunk pre-calculation completed', {
+        totalChunks,
+        regions: this.regions.length,
+        nodes: this.nodes.length,
+        cities: this.cities.length
       });
 
+      return totalChunks;
+
     } catch (error) {
-      logger.error('Failed to cache zone metadata', { error });
+      logger.error('❌ Chunk pre-calculation failed', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
       throw error;
     }
   }
 
-  /**
-   * Obtient les zones pour un chunk donné
-   */
-  async getZonesForChunk(chunkX: number, chunkZ: number): Promise<ChunkZoneData | null> {
-    const chunkKey = `${chunkX},${chunkZ}`;
-    
-    // Essayer d'abord le cache mémoire
-    if (this.chunkCache.has(chunkKey)) {
-      return this.chunkCache.get(chunkKey) || null;
-    }
-
-    // Essayer le cache Redis
+  private async cacheZoneMetadata(): Promise<void> {
     try {
-      const cachedData = await this.redisService.get('zones:chunks');
-      if (cachedData) {
-        const chunkIndex = JSON.parse(cachedData);
-        return chunkIndex[chunkKey] || null;
-      }
-    } catch (error) {
-      logger.warn('Failed to get chunk data from Redis cache', { error });
-    }
+      logger.info('💾 Caching zone metadata in Redis');
 
-    // Calcul en temps réel si pas en cache
-    return this.computeZonesForChunkRealtime(chunkX, chunkZ);
+      const metadata = {
+        regions: this.regions.map(r => ({
+          id: r.id,
+          name: r.name,
+          description: r.description,
+          is_active: r.is_active
+        })),
+        nodes: this.nodes.map(n => ({
+          id: n.id,
+          name: n.name,
+          description: n.description,
+          region_id: n.region_id,
+          is_active: n.is_active
+        })),
+        cities: this.cities.map(c => ({
+          id: c.id,
+          name: c.name,
+          description: c.description,
+          node_id: c.node_id,
+          is_active: c.is_active
+        })),
+        lastUpdate: new Date().toISOString(),
+        totalZones: this.regions.length + this.nodes.length + this.cities.length,
+        chunksProcessed: this.stats.chunksProcessed
+      };
+
+      // Store metadata with 24h expiration
+      await this.redisService.setex('zones:metadata', 86400, JSON.stringify(metadata));
+
+      logger.info('✅ Zone metadata cached successfully', {
+        totalZones: metadata.totalZones,
+        regions: this.regions.length,
+        nodes: this.nodes.length,
+        cities: this.cities.length
+      });
+
+    } catch (error) {
+      logger.error('❌ Failed to cache zone metadata', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw error;
+    }
   }
 
-  /**
-   * Calcule les zones pour un chunk en temps réel
-   */
-  private computeZonesForChunkRealtime(chunkX: number, chunkZ: number): ChunkZoneData | null {
-    const result: ChunkZoneData = {};
+  // ========== REAL-TIME LISTENERS ==========
+  private async setupPostgresListener(): Promise<void> {
+    try {
+      this.postgresListener = await this.databaseService.listenToChanges((notification) => {
+        this.handleZoneChange(notification);
+      });
+      
+      logger.info('✅ PostgreSQL zone change listener activated');
+    } catch (error) {
+      logger.error('❌ Failed to setup PostgreSQL listener', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      // Don't throw - this is not critical for basic functionality
+    }
+  }
 
-    for (const zone of this.allZones) {
-      if (this.isPointInPolygon([chunkX, chunkZ], zone.chunk_boundary)) {
-        if (zone.type === 'region') {
-          result.regionId = zone.id;
-          result.regionName = zone.name;
-        } else if (zone.type === 'node') {
-          result.nodeId = zone.id;
-          result.nodeName = zone.name;
-        } else if (zone.type === 'city') {
-          result.cityId = zone.id;
-          result.cityName = zone.name;
+  private async setupRedisKeyspaceListener(): Promise<void> {
+    try {
+      await this.redisService.subscribeToKeyspaceEvents((uuid, operation) => {
+        this.handlePlayerPositionChange(uuid, operation);
+      });
+      
+      this.keyspaceListener = true;
+      logger.info('✅ Redis keyspace listener activated for REAL-TIME position tracking');
+    } catch (error) {
+      logger.error('❌ Failed to setup Redis keyspace listener', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      // Don't throw - this is not critical for basic functionality
+    }
+  }
+
+  private handleZoneChange(notification: any): void {
+    logger.info('🔄 Zone change detected, triggering resync', { notification });
+    
+    // Trigger zone recalculation asynchronously
+    setImmediate(async () => {
+      try {
+        await this.forceResync();
+      } catch (error) {
+        logger.error('Failed to handle zone change', { 
+          error: error instanceof Error ? error.message : 'Unknown error' 
+        });
+      }
+    });
+  }
+
+  private async handlePlayerPositionChange(uuid: string, operation: string): Promise<void> {
+    if (!this.calculatorService || !this.serviceReady) {
+      return;
+    }
+
+    try {
+      // Get player's current position
+      const position = await this.redisService.getPlayerPosition(uuid);
+      if (!position) return;
+
+      // Calculate zones for current position
+      const zoneData = this.calculatorService.calculateChunkZones(
+        position.chunk_x, position.chunk_z, 
+        this.regions, this.nodes, this.cities
+      );
+
+      // Update player zones if any zones found
+      if (zoneData.regionId || zoneData.nodeId || zoneData.cityId) {
+        await this.redisService.setPlayerZones(uuid, {
+          region_id: zoneData.regionId || undefined,
+          node_id: zoneData.nodeId || undefined,
+          city_id: zoneData.cityId || undefined,
+          last_update: Date.now()
+        });
+
+        // Publish zone events (implementation depends on your event system)
+        await this.publishZoneEvents(uuid, zoneData);
+      }
+
+    } catch (error) {
+      logger.error('Failed to handle player position change', { 
+        uuid, 
+        operation,
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+    }
+  }
+
+  private async publishZoneEvents(uuid: string, zoneData: ChunkZoneData): Promise<void> {
+    try {
+      // Get previous zones to detect changes
+      const previousZones = await this.redisService.getPlayerZones(uuid);
+      
+      // Compare and publish enter/leave events
+      if (previousZones) {
+        // Check for zone changes and publish appropriate events
+        if (previousZones.region_id !== zoneData.regionId) {
+          // Region change logic
+        }
+        if (previousZones.node_id !== zoneData.nodeId) {
+          // Node change logic
+        }
+        if (previousZones.city_id !== zoneData.cityId) {
+          // City change logic
         }
       }
-    }
 
-    return Object.keys(result).length > 0 ? result : null;
+      logger.debug('Zone events processed', { uuid, zoneData });
+    } catch (error) {
+      logger.error('Failed to publish zone events', { 
+        uuid, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+    }
   }
 
-  /**
-   * Obtient les zones pour des coordonnées monde
-   */
+  // ========== PUBLIC API METHODS ==========
+  async forceResync(): Promise<void> {
+    logger.info('🔄 Starting forced resynchronization');
+    await this.performFullSync();
+  }
+
+  async forceFreshSync(): Promise<void> {
+    logger.info('🔄 Starting forced fresh synchronization');
+    
+    // Clear Redis cache before sync
+    try {
+      await this.redisService.del('zones:metadata');
+      const chunkKeys = await this.redisService.keys('chunk:zone:*');
+      if (chunkKeys.length > 0) {
+        await this.redisService.del(chunkKeys);
+      }
+      logger.info('✅ Redis cache cleared for fresh sync');
+    } catch (error) {
+      logger.warn('Failed to clear Redis cache', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+    }
+
+    await this.performFullSync();
+  }
+
+  async performCleanup(): Promise<{
+    deletedChunks: number;
+    deletedPlayers: number;
+    cacheCleared: boolean;
+    errors: string[];
+  }> {
+    logger.info('🧹 Starting cleanup process');
+    const errors: string[] = [];
+    let deletedChunks = 0;
+    let deletedPlayers = 0;
+    let cacheCleared = false;
+
+    try {
+      // Clean expired Redis data
+      const cleanup = await this.redisService.cleanupExpiredData();
+      deletedChunks = cleanup.deletedChunks;
+      deletedPlayers = cleanup.deletedPlayers;
+
+      // Clear zone metadata cache
+      try {
+        await this.redisService.del('zones:metadata');
+        cacheCleared = true;
+      } catch (error) {
+        errors.push('Failed to clear metadata cache');
+      }
+
+      logger.info('✅ Cleanup completed', {
+        deletedChunks,
+        deletedPlayers,
+        cacheCleared,
+        errors: errors.length
+      });
+
+      return {
+        deletedChunks,
+        deletedPlayers,
+        cacheCleared,
+        errors
+      };
+
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      errors.push(errorMsg);
+      logger.error('❌ Cleanup failed', { error: errorMsg });
+      
+      return {
+        deletedChunks,
+        deletedPlayers,
+        cacheCleared,
+        errors
+      };
+    }
+  }
+
+  // ========== STATUS AND MONITORING ==========
+  // ✅ FIX: Méthode publique qui retourne la valeur de la propriété privée
+  isReady(): boolean {
+    return this.serviceReady;
+  }
+
+  getLastSyncTime(): Date | null {
+    return this.lastSyncTime;
+  }
+
+  isSyncInProgress(): boolean {
+    return this.syncInProgress;
+  }
+
+  async getHealthStatus(): Promise<HealthStatus> {
+    const issues: string[] = [];
+    
+    // Check service status
+    if (!this.serviceReady) {
+      issues.push('Service not initialized');
+    }
+
+    // Check Redis connection
+    const redisHealthy = await this.redisService.ping().catch(() => false);
+    if (!redisHealthy) {
+      issues.push('Redis connection failed');
+    }
+
+    // Check last sync time
+    if (this.lastSyncTime && Date.now() - this.lastSyncTime.getTime() > 24 * 60 * 60 * 1000) {
+      issues.push('Last sync more than 24 hours ago');
+    }
+
+    // Check if zones are loaded
+    if (this.regions.length === 0 && this.nodes.length === 0 && this.cities.length === 0) {
+      issues.push('No zones loaded');
+    }
+
+    return {
+      isHealthy: issues.length === 0,
+      lastSync: this.lastSyncTime,
+      syncInProgress: this.syncInProgress,
+      issues,
+      services: {
+        redis: redisHealthy,
+        database: true, // Assume healthy if we got this far
+        calculator: !!this.calculatorService
+      }
+    };
+  }
+
+  async getDetailedStats(): Promise<{
+    service: ZoneSyncStats;
+    zones: {
+      regions: number;
+      nodes: number;
+      cities: number;
+      total: number;
+    };
+    redis: any;
+    database: any;
+  }> {
+    try {
+      const [redisStats, dbStats] = await Promise.all([
+        this.redisService.getStats().catch(() => ({ error: 'Redis stats unavailable' })),
+        this.databaseService.getZoneStats().catch(() => ({ error: 'Database stats unavailable' }))
+      ]);
+
+      this.updateStats();
+
+      return {
+        service: this.stats,
+        zones: {
+          regions: this.regions.length,
+          nodes: this.nodes.length,
+          cities: this.cities.length,
+          total: this.regions.length + this.nodes.length + this.cities.length
+        },
+        redis: redisStats,
+        database: dbStats
+      };
+    } catch (error) {
+      logger.error('Failed to get detailed stats', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      throw error;
+    }
+  }
+
+  private updateStats(): void {
+    this.stats = {
+      isReady: this.serviceReady,
+      lastSyncTime: this.lastSyncTime,
+      syncInProgress: this.syncInProgress,
+      zonesLoaded: this.regions.length + this.nodes.length + this.cities.length,
+      chunksProcessed: this.stats.chunksProcessed,
+      errors: this.stats.errors,
+      performance: this.stats.performance
+    };
+  }
+
+  // ========== ZONE QUERY METHODS ==========
+  async getZonesForChunk(chunkX: number, chunkZ: number): Promise<ChunkZoneData | null> {
+    try {
+      // Try Redis cache first
+      const cached = await this.redisService.getChunkZone(chunkX, chunkZ);
+      if (cached) {
+        return cached;
+      }
+
+      // Calculate in real-time if not cached
+      if (this.calculatorService && this.serviceReady) {
+        return this.calculatorService.calculateChunkZones(
+          chunkX, chunkZ,
+          this.regions, this.nodes, this.cities
+        );
+      }
+
+      return null;
+    } catch (error) {
+      logger.error('Failed to get zones for chunk', { 
+        chunkX, 
+        chunkZ, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+      return null;
+    }
+  }
+
   async getZonesForWorldCoordinates(x: number, z: number): Promise<ChunkZoneData | null> {
     const chunkX = Math.floor(x / 16);
     const chunkZ = Math.floor(z / 16);
     return this.getZonesForChunk(chunkX, chunkZ);
   }
 
-  /**
-   * Force une resynchronisation
-   */
-  async forceResync(): Promise<void> {
-    logger.info('Forcing zone resynchronization');
-    await this.performFullSync();
-  }
-
-  /**
-   * Obtient les statistiques du service
-   */
-  getStats(): any {
-    return {
-      isInitialized: this.isInitialized,
-      syncInProgress: this.syncInProgress,
-      zonesLoaded: this.allZones.length,
-      chunksInCache: this.chunkCache.size,
-      zonesByType: {
-        regions: this.allZones.filter(z => z.type === 'region').length,
-        nodes: this.allZones.filter(z => z.type === 'node').length,
-        cities: this.allZones.filter(z => z.type === 'city').length
+  // ========== CLEANUP ==========
+  async destroy(): Promise<void> {
+    try {
+      logger.info('🛑 Shutting down ZoneSyncService');
+      
+      this.serviceReady = false;
+      this.keyspaceListener = false;
+      
+      // Close PostgreSQL listener
+      if (this.postgresListener) {
+        this.postgresListener.release();
+        this.postgresListener = null;
+        logger.info('✅ PostgreSQL listener closed');
       }
-    };
+      
+      // Clear cached data
+      this.regions = [];
+      this.nodes = [];
+      this.cities = [];
+      
+      logger.info('✅ ZoneSyncService shutdown completed');
+    } catch (error) {
+      logger.error('❌ Error during ZoneSyncService shutdown', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+    }
   }
 }
