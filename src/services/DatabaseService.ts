@@ -377,47 +377,48 @@ async batchUpdatePlayerConnections(connections: PlayerConnectionBatchUpdate[]): 
     `;
 
     // Reconstruire la requête manuellement pour les valeurs par défaut
-    const finalQuery = `
-      WITH new_values AS (
-        SELECT * FROM (VALUES ${connections.map((_, index) => {
-          const base = index * 4;
-          return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4})`;
-        }).join(',')}) AS t(player_uuid, player_name, is_online, last_updated)
-      )
-      INSERT INTO players (
-        player_uuid, player_name, is_online, last_updated,
-        x, y, z, chunk_x, chunk_z, redis_synced
-      )
-      SELECT 
-        player_uuid, player_name, is_online, last_updated,
-        0, 0, 0, 0, 0, false
-      FROM new_values
-      ON CONFLICT (player_uuid) DO UPDATE SET
-        player_name = EXCLUDED.player_name,
-        is_online = EXCLUDED.is_online,
-        last_updated = EXCLUDED.last_updated,
-        x = CASE 
-          WHEN players.x IS NULL OR players.x = 0 THEN 0
-          ELSE players.x
-        END,
-        y = CASE 
-          WHEN players.y IS NULL OR players.y = 0 THEN 0
-          ELSE players.y
-        END,
-        z = CASE 
-          WHEN players.z IS NULL OR players.z = 0 THEN 0
-          ELSE players.z
-        END,
-        chunk_x = CASE 
-          WHEN players.chunk_x IS NULL OR players.chunk_x = 0 THEN 0
-          ELSE players.chunk_x
-        END,
-        chunk_z = CASE 
-          WHEN players.chunk_z IS NULL OR players.chunk_z = 0 THEN 0
-          ELSE players.chunk_z
-        END,
-        redis_synced = false
-    `;
+// Ligne 148 environ - Remplacer la requête par :
+const finalQuery = `
+  WITH new_values AS (
+    SELECT * FROM (VALUES ${connections.map((_, index) => {
+      const base = index * 4;
+      return `($${base + 1}::uuid, $${base + 2}, $${base + 3}, $${base + 4})`;
+    }).join(',')}) AS t(player_uuid, player_name, is_online, last_updated)
+  )
+  INSERT INTO players (
+    player_uuid, player_name, is_online, last_updated,
+    x, y, z, chunk_x, chunk_z, redis_synced
+  )
+  SELECT 
+    player_uuid, player_name, is_online, last_updated,
+    0, 0, 0, 0, 0, false
+  FROM new_values
+  ON CONFLICT (player_uuid) DO UPDATE SET
+    player_name = EXCLUDED.player_name,
+    is_online = EXCLUDED.is_online,
+    last_updated = EXCLUDED.last_updated,
+    x = CASE 
+      WHEN players.x IS NULL OR players.x = 0 THEN 0
+      ELSE players.x
+    END,
+    y = CASE 
+      WHEN players.y IS NULL OR players.y = 0 THEN 0
+      ELSE players.y
+    END,
+    z = CASE 
+      WHEN players.z IS NULL OR players.z = 0 THEN 0
+      ELSE players.z
+    END,
+    chunk_x = CASE 
+      WHEN players.chunk_x IS NULL OR players.chunk_x = 0 THEN 0
+      ELSE players.chunk_x
+    END,
+    chunk_z = CASE 
+      WHEN players.chunk_z IS NULL OR players.chunk_z = 0 THEN 0
+      ELSE players.chunk_z
+    END,
+    redis_synced = false
+`;
 
     await client.query(finalQuery, flatParams);
     await client.query('COMMIT');
