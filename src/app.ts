@@ -12,7 +12,7 @@ import { ChunkCalculatorService } from './services/ChunkCalculatorService';
 import { ApiKeyService } from './services/ApiKeyService';
 import { DatabaseBatchService } from './services/DatabaseBatchService';
 
-// Controllers
+// Controllers - ✅ FIX: Import nommé
 import { ZoneController } from './controllers/ZoneController';
 import { PlayerController } from './controllers/PlayerController';
 
@@ -511,85 +511,85 @@ class Application {
           monitoring: ['GET /api/stats', 'GET /api/health', 'GET /api/system'],
           admin: ['POST /api/admin/sync', 'GET /api/admin/api-keys/stats'],
           websocket: 'ws://localhost:3000/ws/zones?api_key=your_key'
-        }
-      });
-    });
-  }
+       }
+     });
+   });
+ }
 
-  // ========== API KEY MANAGEMENT ENDPOINTS ==========
+ // ========== API KEY MANAGEMENT ENDPOINTS ==========
 
-  private async createApiKey(req: express.Request, res: express.Response): Promise<void> {
-    try {
-      const { keyName, permissions, description, expiresAt, rateLimitPerHour, rateLimitPerMinute } = req.body;
+ private async createApiKey(req: express.Request, res: express.Response): Promise<void> {
+   try {
+     const { keyName, permissions, description, expiresAt, rateLimitPerHour, rateLimitPerMinute } = req.body;
 
-      // Validation
-      if (!keyName || !permissions || !Array.isArray(permissions)) {
-        res.status(400).json({
-          error: 'Invalid request',
-          message: 'keyName and permissions array are required',
-          example: {
-            keyName: 'my_plugin_key',
-            permissions: ['player:read', 'zone:read'],
-            description: 'Optional description',
-            rateLimitPerMinute: 60
-          }
-        });
-        return;
-      }
+     // Validation
+     if (!keyName || !permissions || !Array.isArray(permissions)) {
+       res.status(400).json({
+         error: 'Invalid request',
+         message: 'keyName and permissions array are required',
+         example: {
+           keyName: 'my_plugin_key',
+           permissions: ['player:read', 'zone:read'],
+           description: 'Optional description',
+           rateLimitPerMinute: 60
+         }
+       });
+       return;
+     }
 
-      // Vérifier que les permissions sont valides
-      const validPermissions = [
-        'player:read', 'player:write', 'player:*',
-        'zone:read', 'zone:write', 'zone:*',
-        'chunk:read', 'stats:read', 'batch:manage',
-        'admin:*', 'api:read', '*'
-      ];
+     // Vérifier que les permissions sont valides
+     const validPermissions = [
+       'player:read', 'player:write', 'player:*',
+       'zone:read', 'zone:write', 'zone:*',
+       'chunk:read', 'stats:read', 'batch:manage',
+       'admin:*', 'api:read', '*'
+     ];
 
-      const invalidPermissions = permissions.filter((p: string) => !validPermissions.includes(p));
-      if (invalidPermissions.length > 0) {
-        res.status(400).json({
-          error: 'Invalid permissions',
-          message: `Invalid permissions: ${invalidPermissions.join(', ')}`,
-          validPermissions
-        });
-        return;
-      }
+     const invalidPermissions = permissions.filter((p: string) => !validPermissions.includes(p));
+     if (invalidPermissions.length > 0) {
+       res.status(400).json({
+         error: 'Invalid permissions',
+         message: `Invalid permissions: ${invalidPermissions.join(', ')}`,
+         validPermissions
+       });
+       return;
+     }
 
-      const apiKey = await this.apiKeyService.createApiKey(
-        keyName,
-        permissions,
-        description,
-        expiresAt ? new Date(expiresAt) : undefined,
-        rateLimitPerHour || 1000,
-        rateLimitPerMinute || 60
-      );
+     const apiKey = await this.apiKeyService.createApiKey(
+       keyName,
+       permissions,
+       description,
+       expiresAt ? new Date(expiresAt) : undefined,
+       rateLimitPerHour || 1000,
+       rateLimitPerMinute || 60
+     );
 
-      res.status(201).json({
-        message: 'API key created successfully',
-        data: {
-          keyName,
-          apiKey, // ⚠️ Ne sera affiché qu'une seule fois !
-          permissions,
-          description,
-          rateLimitPerMinute: rateLimitPerMinute || 60,
-          rateLimitPerHour: rateLimitPerHour || 1000,
-          expiresAt
-        },
-        warning: 'This API key will only be shown once. Please save it securely.',
-        realTimeUsage: {
-          websocket: `ws://localhost:3000/ws/zones?api_key=${apiKey}`,
-          redisDirectAccess: 'Plugin can write directly to Redis with HSET player:pos:uuid and player:chunk:uuid',
-          autoDetection: 'Zone changes detected automatically via Redis keyspace notifications'
-        }
-      });
+     res.status(201).json({
+       message: 'API key created successfully',
+       data: {
+         keyName,
+         apiKey, // ⚠️ Ne sera affiché qu'une seule fois !
+         permissions,
+         description,
+         rateLimitPerMinute: rateLimitPerMinute || 60,
+         rateLimitPerHour: rateLimitPerHour || 1000,
+         expiresAt
+       },
+       warning: 'This API key will only be shown once. Please save it securely.',
+       realTimeUsage: {
+         websocket: `ws://localhost:3000/ws/zones?api_key=${apiKey}`,
+         redisDirectAccess: 'Plugin can write directly to Redis with HSET player:pos:uuid and player:chunk:uuid',
+         autoDetection: 'Zone changes detected automatically via Redis keyspace notifications'
+       }
+     });
 
-    } catch (error) {
-      logger.error('Failed to create API key', { 
-        error: error instanceof Error ? error.message : 'Unknown error' 
-      });
-      res.status(500).json({
-        error: 'Server error',
-message: 'Unable to create API key'
+   } catch (error) {
+     logger.error('Failed to create API key', { 
+       error: error instanceof Error ? error.message : 'Unknown error' 
+     });
+     res.status(500).json({
+       error: 'Server error',
+       message: 'Unable to create API key'
      });
    }
  }

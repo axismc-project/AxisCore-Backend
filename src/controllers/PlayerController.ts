@@ -6,7 +6,8 @@ import { PlayerConnectionBatchService } from '../services/PlayerConnectionBatchS
 import { SecurityUtils } from '../utils/security';
 import { logger } from '../utils/logger';
 
-export class PlayerController {
+// ✅ FIX: Suppression du mot-clé export de la déclaration de classe
+class PlayerController {
   private batchService: DatabaseBatchService;
   private connectionBatchService: PlayerConnectionBatchService;
 
@@ -149,7 +150,7 @@ export class PlayerController {
       // Get zone information for this chunk
       const zoneData = await this.redis.getChunkZone(chunkX, chunkZ);
 
-      // ✅ Correction: Conversion explicite null → undefined pour TypeScript
+      // ✅ FIX: Conversion explicite null → undefined avec gestion propre
       this.batchService.queuePlayerUpdate({
         uuid,
         name,
@@ -158,9 +159,9 @@ export class PlayerController {
         z,
         chunkX,
         chunkZ,
-        regionId: zoneData?.regionId ?? undefined,  // null → undefined
-        nodeId: zoneData?.nodeId ?? undefined,      // null → undefined
-        cityId: zoneData?.cityId ?? undefined       // null → undefined
+        regionId: zoneData?.regionId || undefined,  // ✅ null ou number → undefined si null
+        nodeId: zoneData?.nodeId || undefined,      // ✅ null ou number → undefined si null
+        cityId: zoneData?.cityId || undefined       // ✅ null ou number → undefined si null
       });
 
       // Update Redis cache
@@ -175,9 +176,9 @@ export class PlayerController {
 
       if (zoneData?.regionId || zoneData?.nodeId || zoneData?.cityId) {
         await this.redis.setPlayerZones(uuid, {
-          region_id: zoneData.regionId ?? undefined,   // ✅ null → undefined
-          node_id: zoneData.nodeId ?? undefined,       // ✅ null → undefined
-          city_id: zoneData.cityId ?? undefined,       // ✅ null → undefined
+          region_id: zoneData.regionId || undefined,   // ✅ null → undefined
+          node_id: zoneData.nodeId || undefined,       // ✅ null → undefined
+          city_id: zoneData.cityId || undefined,       // ✅ null → undefined
           last_update: Date.now()
         });
       }
@@ -237,9 +238,9 @@ export class PlayerController {
 
       if (zoneData?.regionId || zoneData?.nodeId || zoneData?.cityId) {
         await this.redis.setPlayerZones(uuid, {
-          region_id: zoneData.regionId ?? undefined,   // ✅ null → undefined
-          node_id: zoneData.nodeId ?? undefined,       // ✅ null → undefined
-          city_id: zoneData.cityId ?? undefined,       // ✅ null → undefined
+          region_id: zoneData.regionId || undefined,   // ✅ null → undefined
+          node_id: zoneData.nodeId || undefined,       // ✅ null → undefined
+          city_id: zoneData.cityId || undefined,       // ✅ null → undefined
           last_update: Date.now()
         });
       }
@@ -363,4 +364,5 @@ export class PlayerController {
   }
 }
 
-export default PlayerController;
+// ✅ FIX: Export nommé uniquement à la fin
+export { PlayerController };

@@ -218,8 +218,8 @@ export class ApiKeyService {
     try {
       const result = await this.pool.query(query, [keyName]);
       
-      // ✅ Correction: Vérification null-safe de rowCount
-      const revoked = (result.rowCount ?? 0) > 0;
+      // ✅ FIX: Vérification null-safe de rowCount avec cast explicite
+      const revoked = (result.rowCount || 0) > 0;
       
       if (revoked) {
         logger.info('API key revoked', { keyName });
@@ -333,7 +333,7 @@ export class ApiKeyService {
 
     try {
       const result = await this.pool.query(query, [JSON.stringify(newPermissions), keyName]);
-      const updated = (result.rowCount ?? 0) > 0;
+      const updated = (result.rowCount || 0) > 0;
       
       if (updated) {
         logger.info('API key permissions updated', { keyName, newPermissions });
@@ -360,7 +360,7 @@ export class ApiKeyService {
 
     try {
       const result = await this.pool.query(query, [rateLimitPerHour, rateLimitPerMinute, keyName]);
-      const updated = (result.rowCount ?? 0) > 0;
+      const updated = (result.rowCount || 0) > 0;
       
       if (updated) {
         logger.info('API key rate limits updated', { keyName, rateLimitPerHour, rateLimitPerMinute });
@@ -387,7 +387,7 @@ export class ApiKeyService {
 
     try {
       const result = await this.pool.query(query);
-      const deletedCount = result.rowCount ?? 0;
+      const deletedCount = result.rowCount || 0;
       
       if (deletedCount > 0) {
         logger.info('Cleaned up old API usage logs', { deletedCount });

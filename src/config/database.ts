@@ -2,7 +2,7 @@ import { Pool, PoolConfig } from 'pg';
 import { logger } from '../utils/logger';
 
 export class DatabaseConfig {
-  private static instance: Pool;
+  private static instance: Pool | null = null; // ✅ FIX: Déclaration explicite avec null
 
   static getInstance(): Pool {
     if (!DatabaseConfig.instance) {
@@ -85,7 +85,7 @@ export class DatabaseConfig {
       } catch (error) {
         logger.error('Erreur fermeture pool PostgreSQL:', error);
       } finally {
-        DatabaseConfig.instance = null as any;
+        DatabaseConfig.instance = null; // ✅ FIX: Assignation explicite null
       }
     }
   }
