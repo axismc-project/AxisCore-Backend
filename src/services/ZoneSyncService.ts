@@ -567,10 +567,7 @@ private async handlePlayerPositionChange(uuid: string, operation: string): Promi
   });
 
   if (!this.calculatorService || !this.serviceReady) {
-    logger.warn('⚠️ SERVICE: Not ready for position processing', { 
-      serviceReady: this.serviceReady,
-      hasCalculator: !!this.calculatorService 
-    });
+    logger.warn('⚠️ SERVICE: Not ready for position processing');
     return;
   }
 
@@ -597,7 +594,10 @@ private async handlePlayerPositionChange(uuid: string, operation: string): Promi
     logger.info('🗺️ ZONE CALCULATION: Result', { 
       uuid,
       chunk: `${chunkData.chunk_x},${chunkData.chunk_z}`,
-      zoneData 
+      zoneData,
+      hasRegions: this.regions.length,
+      hasNodes: this.nodes.length,
+      hasCities: this.cities.length
     });
 
     // 4. Get previous zones to detect changes
@@ -615,28 +615,38 @@ private async handlePlayerPositionChange(uuid: string, operation: string): Promi
     await this.redisService.setPlayerZones(uuid, newZones);
     logger.info('💾 REDIS UPDATE: Player zones updated', { uuid, newZones });
 
-    // 6. **NOUVEAU** : Synchroniser vers la base de données
-    if (positionData && this.batchService) {
-      logger.info('📊 DATABASE SYNC: Queuing player update', { uuid });
+    // 6. **CORRECTION** : Synchroniser vers la base avec les zones calculées
+    if (this.batchService) {
+      logger.info('📊 DATABASE SYNC: Queuing player update with zones', { 
+        uuid,
+        zones: {
+          regionId: zoneData.regionId,
+          nodeId: zoneData.nodeId,
+          cityId: zoneData.cityId
+        }
+      });
+      
+      // ✅ CORRECTION : Utiliser les données du chunk actuel + position (si disponible)
+      const playerName = await this.getPlayerName(uuid);
       
       this.batchService.queuePlayerUpdate({
         uuid,
-        name: `Player_${uuid.substring(0, 8)}`, // Nom temporaire, vous devriez le stocker
-        x: positionData.x,
-        y: positionData.y,
-        z: positionData.z,
+        name: playerName,
+        x: positionData ? positionData.x : chunkData.chunk_x * 16,  // Approximation si pas de position exacte
+        y: positionData ? positionData.y : 64,                     // Approximation
+        z: positionData ? positionData.z : chunkData.chunk_z * 16, // Approximation
         chunkX: chunkData.chunk_x,
         chunkZ: chunkData.chunk_z,
-        regionId: zoneData.regionId || undefined,
-        nodeId: zoneData.nodeId || undefined,
-        cityId: zoneData.cityId || undefined
+        regionId: zoneData.regionId || undefined,                  // ✅ AJOUT des zones
+        nodeId: zoneData.nodeId || undefined,                      // ✅ AJOUT des zones
+        cityId: zoneData.cityId || undefined                       // ✅ AJOUT des zones
       });
       
-      logger.info('✅ DATABASE SYNC: Player update queued', { uuid });
-    } else {
-      logger.warn('⚠️ DATABASE SYNC: Missing data or batch service', { 
-        hasPositionData: !!positionData,
-        hasBatchService: !!this.batchService 
+      logger.info('✅ DATABASE SYNC: Player update queued with zones', { 
+        uuid,
+        regionId: zoneData.regionId,
+        nodeId: zoneData.nodeId,
+        cityId: zoneData.cityId
       });
     }
 
@@ -647,9 +657,24 @@ private async handlePlayerPositionChange(uuid: string, operation: string): Promi
     logger.error('❌ PROCESSING: Failed to handle player position change', { 
       uuid, 
       operation,
-      error: error instanceof Error ? error.message : 'Unknown error',
-      stack: error instanceof Error ? error.stack : undefined
+      error: error instanceof Error ? error.message : 'Unknown error'
     });
+  }
+}
+
+// ✅ AJOUT : Méthode pour récupérer le nom du joueur
+private async getPlayerName(uuid: string): Promise<string> {
+  try {
+    // Essayer de récupérer depuis la DB
+    const player = await this.databaseService.getPlayerByUuid(uuid);
+    if (player?.player_name) {
+      return player.player_name;
+    }
+    
+    // Sinon, nom par défaut
+    return `Player_${uuid.substring(0, 8)}`;
+  } catch (error) {
+    return `Player_${uuid.substring(0, 8)}`;
   }
 }
 
