@@ -454,29 +454,33 @@ export class RedisService {
   }
 
   // ========== KEYSPACE NOTIFICATIONS LISTENER ==========
-  async subscribeToKeyspaceEvents(callback: (uuid: string, operation: string) => void): Promise<void> {
-    const subscriber = this.getSubscriber();
+async subscribeToKeyspaceEvents(callback: (uuid: string, operation: string) => void): Promise<void> {
+  const subscriber = this.getSubscriber();
+  
+  try {
+    logger.info('🔧 REDIS: Setting up keyspace event subscriptions...');
     
-    try {
-      // S'abonner aux notifications sur les positions et chunks
-      await subscriber.pSubscribe('__keyspace@0__:player:pos:*', (message, channel) => {
-        const uuid = channel.replace('__keyspace@0__:player:pos:', '');
-        callback(uuid, 'position_update');
-      });
-      
-      await subscriber.pSubscribe('__keyspace@0__:player:chunk:*', (message, channel) => {
-        const uuid = channel.replace('__keyspace@0__:player:chunk:', '');
-        callback(uuid, 'chunk_update');
-      });
-      
-      logger.info('🔥 Redis keyspace notifications subscribed - REAL-TIME ACTIVATED');
-    } catch (error) {
-      logger.error('Failed to subscribe to keyspace events', { 
-        error: error instanceof Error ? error.message : 'Unknown error' 
-      });
-      throw new Error('Unable to subscribe to keyspace events');
-    }
+    // S'abonner aux notifications sur les positions et chunks
+    await subscriber.pSubscribe('__keyspace@0__:player:pos:*', (message, channel) => {
+      const uuid = channel.replace('__keyspace@0__:player:pos:', '');
+      logger.info('📍 REDIS KEYSPACE: Position update detected', { uuid, message, channel });
+      callback(uuid, 'position_update');
+    });
+    
+    await subscriber.pSubscribe('__keyspace@0__:player:chunk:*', (message, channel) => {
+      const uuid = channel.replace('__keyspace@0__:player:chunk:', '');
+      logger.info('📦 REDIS KEYSPACE: Chunk update detected', { uuid, message, channel });
+      callback(uuid, 'chunk_update');
+    });
+    
+    logger.info('🔥 REDIS: Keyspace notifications subscribed - REAL-TIME ACTIVATED');
+  } catch (error) {
+    logger.error('❌ REDIS: Failed to subscribe to keyspace events', { 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
+    throw new Error('Unable to subscribe to keyspace events');
   }
+}
 
   // ========== LISTES JOUEURS PAR ZONE ==========
   async addPlayerToZone(zoneType: 'region' | 'node' | 'city', zoneId: number, uuid: string): Promise<void> {

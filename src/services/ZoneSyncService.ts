@@ -509,21 +509,39 @@ private async preCalculateAllChunks(): Promise<number> {
     }
   }
 
-  private async setupRedisKeyspaceListener(): Promise<void> {
-    try {
-      await this.redisService.subscribeToKeyspaceEvents((uuid, operation) => {
-        this.handlePlayerPositionChange(uuid, operation);
+private async setupRedisKeyspaceListener(): Promise<void> {
+  try {
+    logger.info('🔧 SETUP: Configuring keyspace listener...');
+    
+    await this.redisService.subscribeToKeyspaceEvents((uuid, operation) => {
+      logger.info('🔔 KEYSPACE EVENT CAPTURED', { 
+        uuid, 
+        operation, 
+        timestamp: Date.now(),
+        serviceReady: this.serviceReady 
       });
       
-      this.keyspaceListener = true;
-      logger.info('✅ Redis keyspace listener activated for REAL-TIME position tracking');
-    } catch (error) {
-      logger.error('❌ Failed to setup Redis keyspace listener', { 
-        error: error instanceof Error ? error.message : 'Unknown error' 
+      // Force immediate processing
+      setImmediate(async () => {
+        try {
+          await this.handlePlayerPositionChange(uuid, operation);
+        } catch (error) {
+          logger.error('Error in immediate position change handler', {
+            uuid,
+            error: error instanceof Error ? error.message : 'Unknown error'
+          });
+        }
       });
-      // Don't throw - this is not critical for basic functionality
-    }
+    });
+    
+    this.keyspaceListener = true;
+    logger.info('✅ SETUP: Redis keyspace listener activated');
+  } catch (error) {
+    logger.error('❌ SETUP: Failed to setup Redis keyspace listener', { 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
   }
+}
 
   private handleZoneChange(notification: any): void {
     logger.info('🔄 Zone change detected, triggering resync', { notification });
@@ -540,71 +558,207 @@ private async preCalculateAllChunks(): Promise<number> {
     });
   }
 
-  private async handlePlayerPositionChange(uuid: string, operation: string): Promise<void> {
-    if (!this.calculatorService || !this.serviceReady) {
+private async handlePlayerPositionChange(uuid: string, operation: string): Promise<void> {
+  logger.info('🔄 PROCESSING: Player position change', { 
+    uuid, 
+    operation, 
+    serviceReady: this.serviceReady,
+    hasCalculator: !!this.calculatorService 
+  });
+
+  if (!this.calculatorService || !this.serviceReady) {
+    logger.warn('⚠️ SERVICE: Not ready for position processing', { 
+      serviceReady: this.serviceReady,
+      hasCalculator: !!this.calculatorService 
+    });
+    return;
+  }
+
+  try {
+    // 1. Get player's current chunk data
+    const chunkData = await this.redisService.getPlayerChunk(uuid);
+    logger.info('📦 CHUNK DATA: Retrieved', { uuid, chunkData });
+
+    if (!chunkData) {
+      logger.warn('⚠️ CHUNK DATA: No chunk data found', { uuid });
       return;
     }
 
-    try {
-      // Get player's current position
-      const position = await this.redisService.getPlayerPosition(uuid);
-      if (!position) return;
+    // 2. Get player's position data for database sync
+    const positionData = await this.redisService.getPlayerPosition(uuid);
+    logger.info('📍 POSITION DATA: Retrieved', { uuid, positionData });
 
-      // Calculate zones for current position
-      const zoneData = this.calculatorService.calculateChunkZones(
-        position.chunk_x, position.chunk_z, 
-        this.regions, this.nodes, this.cities
-      );
+    // 3. Calculate zones for current chunk
+    const zoneData = this.calculatorService.calculateChunkZones(
+      chunkData.chunk_x, chunkData.chunk_z, 
+      this.regions, this.nodes, this.cities
+    );
 
-      // Update player zones if any zones found
-      if (zoneData.regionId || zoneData.nodeId || zoneData.cityId) {
-        await this.redisService.setPlayerZones(uuid, {
-          region_id: zoneData.regionId || undefined,
-          node_id: zoneData.nodeId || undefined,
-          city_id: zoneData.cityId || undefined,
-          last_update: Date.now()
-        });
+    logger.info('🗺️ ZONE CALCULATION: Result', { 
+      uuid,
+      chunk: `${chunkData.chunk_x},${chunkData.chunk_z}`,
+      zoneData 
+    });
 
-        // Publish zone events (implementation depends on your event system)
-        await this.publishZoneEvents(uuid, zoneData);
-      }
+    // 4. Get previous zones to detect changes
+    const previousZones = await this.redisService.getPlayerZones(uuid);
+    logger.info('📋 PREVIOUS ZONES: Retrieved', { uuid, previousZones });
 
-    } catch (error) {
-      logger.error('Failed to handle player position change', { 
-        uuid, 
-        operation,
-        error: error instanceof Error ? error.message : 'Unknown error' 
-      });
-    }
-  }
+    // 5. Update player zones in Redis
+    const newZones = {
+      region_id: zoneData.regionId || undefined,
+      node_id: zoneData.nodeId || undefined,
+      city_id: zoneData.cityId || undefined,
+      last_update: Date.now()
+    };
 
-  private async publishZoneEvents(uuid: string, zoneData: ChunkZoneData): Promise<void> {
-    try {
-      // Get previous zones to detect changes
-      const previousZones = await this.redisService.getPlayerZones(uuid);
+    await this.redisService.setPlayerZones(uuid, newZones);
+    logger.info('💾 REDIS UPDATE: Player zones updated', { uuid, newZones });
+
+    // 6. **NOUVEAU** : Synchroniser vers la base de données
+    if (positionData && this.batchService) {
+      logger.info('📊 DATABASE SYNC: Queuing player update', { uuid });
       
-      // Compare and publish enter/leave events
-      if (previousZones) {
-        // Check for zone changes and publish appropriate events
-        if (previousZones.region_id !== zoneData.regionId) {
-          // Region change logic
-        }
-        if (previousZones.node_id !== zoneData.nodeId) {
-          // Node change logic
-        }
-        if (previousZones.city_id !== zoneData.cityId) {
-          // City change logic
-        }
-      }
-
-      logger.debug('Zone events processed', { uuid, zoneData });
-    } catch (error) {
-      logger.error('Failed to publish zone events', { 
-        uuid, 
-        error: error instanceof Error ? error.message : 'Unknown error' 
+      this.batchService.queuePlayerUpdate({
+        uuid,
+        name: `Player_${uuid.substring(0, 8)}`, // Nom temporaire, vous devriez le stocker
+        x: positionData.x,
+        y: positionData.y,
+        z: positionData.z,
+        chunkX: chunkData.chunk_x,
+        chunkZ: chunkData.chunk_z,
+        regionId: zoneData.regionId || undefined,
+        nodeId: zoneData.nodeId || undefined,
+        cityId: zoneData.cityId || undefined
+      });
+      
+      logger.info('✅ DATABASE SYNC: Player update queued', { uuid });
+    } else {
+      logger.warn('⚠️ DATABASE SYNC: Missing data or batch service', { 
+        hasPositionData: !!positionData,
+        hasBatchService: !!this.batchService 
       });
     }
+
+    // 7. Publish zone events for any changes
+    await this.publishZoneEvents(uuid, zoneData, previousZones);
+
+  } catch (error) {
+    logger.error('❌ PROCESSING: Failed to handle player position change', { 
+      uuid, 
+      operation,
+      error: error instanceof Error ? error.message : 'Unknown error',
+      stack: error instanceof Error ? error.stack : undefined
+    });
   }
+}
+
+private async publishZoneEvents(uuid: string, newZones: any, previousZones: any): Promise<void> {
+  try {
+    logger.info('📡 EVENTS: Publishing zone events', { uuid, newZones, previousZones });
+
+    const events = [];
+
+    // Detect region changes
+    if (previousZones?.region_id !== newZones.regionId) {
+      if (previousZones?.region_id) {
+        const leaveEvent = {
+          playerUuid: uuid,
+          zoneType: 'region' as const,
+          zoneId: previousZones.region_id,
+          zoneName: 'Previous Region',
+          eventType: 'leave' as const,
+          timestamp: Date.now()
+        };
+        await this.redisService.publishZoneEvent(leaveEvent);
+        events.push('region_leave');
+        logger.info('📤 EVENT: Region LEAVE published', leaveEvent);
+      }
+      
+      if (newZones.regionId) {
+        const enterEvent = {
+          playerUuid: uuid,
+          zoneType: 'region' as const,
+          zoneId: newZones.regionId,
+          zoneName: newZones.regionName || 'Unknown Region',
+          eventType: 'enter' as const,
+          timestamp: Date.now()
+        };
+        await this.redisService.publishZoneEvent(enterEvent);
+        events.push('region_enter');
+        logger.info('📤 EVENT: Region ENTER published', enterEvent);
+      }
+    }
+
+    // Similar logic for nodes and cities...
+    if (previousZones?.node_id !== newZones.nodeId) {
+      if (previousZones?.node_id) {
+        const leaveEvent = {
+          playerUuid: uuid,
+          zoneType: 'node' as const,
+          zoneId: previousZones.node_id,
+          zoneName: 'Previous Node',
+          eventType: 'leave' as const,
+          timestamp: Date.now()
+        };
+        await this.redisService.publishZoneEvent(leaveEvent);
+        events.push('node_leave');
+        logger.info('📤 EVENT: Node LEAVE published', leaveEvent);
+      }
+      
+      if (newZones.nodeId) {
+        const enterEvent = {
+          playerUuid: uuid,
+          zoneType: 'node' as const,
+          zoneId: newZones.nodeId,
+          zoneName: newZones.nodeName || 'Unknown Node',
+          eventType: 'enter' as const,
+          timestamp: Date.now()
+        };
+        await this.redisService.publishZoneEvent(enterEvent);
+        events.push('node_enter');
+        logger.info('📤 EVENT: Node ENTER published', enterEvent);
+      }
+    }
+
+    if (previousZones?.city_id !== newZones.cityId) {
+      if (previousZones?.city_id) {
+        const leaveEvent = {
+          playerUuid: uuid,
+          zoneType: 'city' as const,
+          zoneId: previousZones.city_id,
+          zoneName: 'Previous City',
+          eventType: 'leave' as const,
+          timestamp: Date.now()
+        };
+        await this.redisService.publishZoneEvent(leaveEvent);
+        events.push('city_leave');
+        logger.info('📤 EVENT: City LEAVE published', leaveEvent);
+      }
+      
+      if (newZones.cityId) {
+        const enterEvent = {
+          playerUuid: uuid,
+          zoneType: 'city' as const,
+          zoneId: newZones.cityId,
+          zoneName: newZones.cityName || 'Unknown City',
+          eventType: 'enter' as const,
+          timestamp: Date.now()
+        };
+        await this.redisService.publishZoneEvent(enterEvent);
+        events.push('city_enter');
+        logger.info('📤 EVENT: City ENTER published', enterEvent);
+      }
+    }
+
+    logger.info('✅ EVENTS: Zone events published', { uuid, eventsCount: events.length, events });
+  } catch (error) {
+    logger.error('❌ EVENTS: Failed to publish zone events', { 
+      uuid, 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
+  }
+}
 
   // ========== PUBLIC API METHODS ==========
   async forceResync(): Promise<void> {
