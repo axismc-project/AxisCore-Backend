@@ -22,7 +22,6 @@ export const NodeSchema = z.object({
   region_id: z.number().int().positive(),
   chunk_boundary: PolygonSchema,
   boundary_cache: z.string(),
-  experience_points: z.number().int().min(0),
   is_active: z.boolean(),
   created_at: z.date(),
   updated_at: z.date()

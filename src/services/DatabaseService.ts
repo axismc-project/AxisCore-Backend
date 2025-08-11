@@ -713,7 +713,7 @@ async createZone(
       params = [name, description, JSON.stringify(polygon), JSON.stringify(polygon)];
     } else if (zoneType === 'node') {
       query = `
-        INSERT INTO nodes (name, description, region_id, chunk_boundary, boundary_cache, experience_points, is_active)
+        INSERT INTO nodes (name, description, region_id, chunk_boundary, boundary_cache, is_active)
         VALUES ($1, $2, $3, $4, $5, 1, 0, true)
         RETURNING id
       `;

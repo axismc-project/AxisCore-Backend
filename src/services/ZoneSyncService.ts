@@ -603,7 +603,6 @@ private async syncPlayersFromDatabase(): Promise<void> {
           name: node.name,
           description: node.description || '',
           region_id: node.region_id,
-          experience_points: node.experience_points,
           is_active: node.is_active,
           created_at: node.created_at.toISOString()
         };
@@ -957,7 +956,6 @@ private async syncPlayersFromDatabase(): Promise<void> {
        name: node.name,
        description: node.description || '',
        region_id: node.region_id,
-       experience_points: node.experience_points,
        is_active: node.is_active,
        created_at: node.created_at.toISOString()
      })
