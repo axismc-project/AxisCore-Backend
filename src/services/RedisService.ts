@@ -603,27 +603,34 @@ export class RedisService {
     }
   }
 
-  async subscribeToZoneEvents(callback: (channel: string, message: string) => void): Promise<void> {
-    const subscriber = this.getSubscriber();
-    
-    const channels = [
-      'zone.region.enter', 'zone.region.leave',
-      'zone.node.enter', 'zone.node.leave',
-      'zone.city.enter', 'zone.city.leave'
-    ];
+ async subscribeToZoneEvents(callback: (channel: string, message: string) => void): Promise<void> {
+  const subscriber = this.getSubscriber();
+  
+  const channels = [
+    'zone.region.enter', 'zone.region.leave',
+    'zone.node.enter', 'zone.node.leave',
+    'zone.city.enter', 'zone.city.leave'
+  ];
 
-    try {
-      for (const channel of channels) {
-        await subscriber.subscribe(channel, callback);
-      }
-      logger.info('Subscribed to zone events', { channelCount: channels.length });
-    } catch (error) {
-      logger.error('Failed to subscribe to zone events', { 
-        error: error instanceof Error ? error.message : 'Unknown error' 
+  try {
+    for (const channel of channels) {
+      // ✅ FIX: S'assurer que l'ordre des paramètres est correct
+      await subscriber.subscribe(channel, (message, receivedChannel) => {
+        logger.debug('📡 REDIS CALLBACK', { 
+          receivedChannel, 
+          messagePreview: message.substring(0, 100) 
+        });
+        callback(receivedChannel, message);
       });
-      throw new Error('Unable to subscribe to zone events');
     }
+    logger.info('Subscribed to zone events', { channelCount: channels.length });
+  } catch (error) {
+    logger.error('Failed to subscribe to zone events', { 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
+    throw new Error('Unable to subscribe to zone events');
   }
+}
 
   private async addEventToStream(event: ZoneEvent): Promise<void> {
     const client = this.getClient();

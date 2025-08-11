@@ -149,37 +149,58 @@ export class ZoneWebSocketServer {
   }
 
   // ========== GESTION DES MESSAGES (LECTURE SEULE) ==========
-  private handleMessage(ws: AuthenticatedWebSocket, data: WebSocket.RawData): void {
-    try {
-      const message = JSON.parse(data.toString());
-      
-      // Seuls les pings sont autorisés
-      if (message.type === 'ping') {
-        this.sendToClient(ws, { 
-          type: 'pong', 
-          timestamp: Date.now() 
-        });
-        return;
-      }
+private handleMessage(ws: AuthenticatedWebSocket, data: WebSocket.RawData): void {
+  try {
+    const messageStr = data.toString();
+    
+    // ✅ LOG DE DEBUG
+    logger.info('📨 WEBSOCKET MESSAGE RECEIVED', {
+      messageType: typeof messageStr,
+      messageContent: messageStr,
+      isValidJson: this.isValidJson(messageStr)
+    });
 
-      // Rejeter tout autre message
+    // ✅ VALIDATION JSON
+    if (!this.isValidJson(messageStr)) {
+      logger.warn('⚠️ Invalid JSON from WebSocket client', { message: messageStr });
       this.sendToClient(ws, {
         type: 'error',
-        message: 'WebSocket en lecture seule - Aucune commande autorisée',
+        message: 'Invalid JSON format',
         timestamp: Date.now()
       });
-      
-    } catch (error) {
-      logger.error('Erreur traitement message WebSocket:', { 
-        error: error instanceof Error ? error.message : 'Unknown error' 
-      });
-      this.sendToClient(ws, {
-        type: 'error',
-        message: 'Message invalide',
-        timestamp: Date.now()
-      });
+      return;
     }
+
+    const message = JSON.parse(messageStr);
+    
+    // Seuls les pings sont autorisés
+    if (message.type === 'ping') {
+      this.sendToClient(ws, { 
+        type: 'pong', 
+        timestamp: Date.now() 
+      });
+      return;
+    }
+
+    // Rejeter tout autre message
+    this.sendToClient(ws, {
+      type: 'error',
+      message: 'WebSocket en lecture seule - Seuls les pings sont autorisés',
+      timestamp: Date.now()
+    });
+    
+  } catch (error) {
+    logger.error('Erreur traitement message WebSocket:', { 
+      error: error instanceof Error ? error.message : 'Unknown error',
+      rawMessage: data.toString()
+    });
+    this.sendToClient(ws, {
+      type: 'error',
+      message: 'Erreur de traitement du message',
+      timestamp: Date.now()
+    });
   }
+} 
 
   private handleDisconnection(ws: AuthenticatedWebSocket, code: number, reason: Buffer): void {
     this.authenticatedClients.delete(ws);
@@ -189,46 +210,89 @@ export class ZoneWebSocketServer {
   }
 
   // ========== DIFFUSION REDIS → WEBSOCKET ==========
-  private async subscribeToRedisEvents(): Promise<void> {
-    try {
-      await this.redis.subscribeToZoneEvents((channel: string, message: string) => {
-        this.handleZoneEvent(channel, message);
+private async subscribeToRedisEvents(): Promise<void> {
+  try {
+    // ✅ FIX: Le callback Redis reçoit (message, channel) et non (channel, message)
+    await this.redis.subscribeToZoneEvents((channel: string, message: string) => {
+      // ✅ LOG DE DEBUG
+      logger.info('🔥 REDIS EVENT RECEIVED', { 
+        channel, 
+        messagePreview: message.substring(0, 100),
+        messageLength: message.length 
       });
       
-      logger.info('📡 Souscription aux événements Redis réussie');
-    } catch (error) {
-      logger.error('❌ Erreur souscription événements Redis:', { 
-        error: error instanceof Error ? error.message : 'Unknown error' 
-      });
-    }
+      this.handleZoneEvent(channel, message);
+    });
+    
+    logger.info('📡 Souscription aux événements Redis réussie');
+  } catch (error) {
+    logger.error('❌ Erreur souscription événements Redis:', { 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
   }
+}
 
-  private handleZoneEvent(channel: string, message: string): void {
-    try {
-      const event: ZoneEvent = JSON.parse(message);
-      
-      // Créer le message simplifié
-      const simplifiedEvent = {
-        type: 'zone_event',
-        data: {
-          playerUuid: event.playerUuid,
-          action: event.eventType, // 'enter' ou 'leave'
-          zoneType: event.zoneType, // 'region', 'node', 'city'
-          zoneId: event.zoneId,
-          zoneName: event.zoneName
-        },
-        timestamp: event.timestamp
-      };
-      
-      // Diffuser à tous les clients authentifiés
-      this.broadcast(simplifiedEvent);
-      
-    } catch (error) {
-      logger.error('Erreur traitement événement zone:', { 
-        error: error instanceof Error ? error.message : 'Unknown error' 
-      });
+private handleZoneEvent(channel: string, message: string): void {
+  try {
+    // ✅ LOG DE DEBUG DÉTAILLÉ
+    logger.info('🔄 PROCESSING ZONE EVENT', { 
+      channel,
+      messageType: typeof message,
+      messageContent: message,
+      isValidJson: this.isValidJson(message)
+    });
+
+    // ✅ VALIDATION JSON
+    if (!this.isValidJson(message)) {
+      logger.warn('⚠️ Invalid JSON message received', { channel, message });
+      return;
     }
+
+    const event: ZoneEvent = JSON.parse(message);
+    
+    // ✅ VALIDATION STRUCTURE
+    if (!event.playerUuid || !event.zoneType || !event.eventType) {
+      logger.warn('⚠️ Invalid event structure', { event });
+      return;
+    }
+    
+    const simplifiedEvent = {
+      type: 'zone_event',
+      data: {
+        playerUuid: event.playerUuid,
+        action: event.eventType,
+        zoneType: event.zoneType,
+        zoneId: event.zoneId,
+        zoneName: event.zoneName
+      },
+      timestamp: event.timestamp
+    };
+    
+    logger.info('✅ Broadcasting zone event', { 
+      event: simplifiedEvent,
+      clientCount: this.authenticatedClients.size 
+    });
+    
+    this.broadcast(simplifiedEvent);
+    
+  } catch (error) {
+    logger.error('Erreur traitement événement zone:', { 
+      error: error instanceof Error ? error.message : 'Unknown error',
+      channel,
+      message
+    });
   }
+}
+
+// ✅ HELPER POUR VALIDATION JSON
+private isValidJson(str: string): boolean {
+  try {
+    JSON.parse(str);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
   // ========== DIFFUSION ==========
   private broadcast(message: any): void {
