@@ -28,25 +28,30 @@ async init(): Promise<void> {
   try {
     // 1. Complete initial synchronization
     await this.fullSync();
-    logger.info('✅ Full sync completed - continuing...'); // ✅ AJOUT
+    logger.info('✅ Full sync completed - continuing...');
     
-    // 2. Bidirectional sync: Database to Redis
-    await this.syncPlayersFromDatabase();
-    logger.info('✅ Bidirectional sync completed - continuing...'); // ✅ AJOUT
+    // 2. ✅ FIX: Bidirectional sync (non-blocking to avoid startup hang)
+    logger.info('🔄 Starting bidirectional sync (non-blocking)...');
+    this.syncPlayersFromDatabase().catch(error => {
+      logger.error('⚠️ Bidirectional sync failed (continuing anyway)', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+    });
+    logger.info('✅ Bidirectional sync queued - continuing...');
     
     // 3. Start PostgreSQL change listener (auto-recalcul zones)
-    logger.info('🔄 About to start PostgreSQL listener...'); // ✅ AJOUT
+    logger.info('🔄 About to start PostgreSQL listener...');
     await this.startPostgresListener();
-    logger.info('✅ PostgreSQL listener started - continuing...'); // ✅ AJOUT
+    logger.info('✅ PostgreSQL listener started - continuing...');
     
     // 4. ✅ Start Redis keyspace notifications (REAL-TIME positions)
-    logger.info('🔥 About to start Redis keyspace listener...'); // ✅ AJOUT
+    logger.info('🔥 About to start Redis keyspace listener...');
     await this.startRedisKeyspaceListener();
-    logger.info('✅ Redis keyspace listener started - continuing...'); // ✅ AJOUT
+    logger.info('✅ Redis keyspace listener started - continuing...');
     
     // 5. Schedule automatic cleanup
     this.scheduleCleanup();
-    logger.info('✅ Cleanup scheduled - continuing...'); // ✅ AJOUT
+    logger.info('✅ Cleanup scheduled - continuing...');
     
     this.isInitialized = true;
     logger.info('✅ REAL-TIME zone sync service initialized successfully');
@@ -55,7 +60,7 @@ async init(): Promise<void> {
     logger.error('❌ Failed to initialize zone sync service', { 
       error: error instanceof Error ? error.message : 'Unknown error' 
     });
-    throw new Error('Unable to initialize synchronization service');
+    throw new Error('Unable to initialize zone sync service');
   }
 }
 
