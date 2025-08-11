@@ -382,7 +382,7 @@ const finalQuery = `
   WITH new_values AS (
     SELECT * FROM (VALUES ${connections.map((_, index) => {
       const base = index * 4;
-      return `($${base + 1}::uuid, $${base + 2}, $${base + 3}, $${base + 4})`;
+      return `($${base + 1}::uuid, $${base + 2}::text, $${base + 3}::boolean, $${base + 4}::timestamp)`;
     }).join(',')}) AS t(player_uuid, player_name, is_online, last_updated)
   )
   INSERT INTO players (
