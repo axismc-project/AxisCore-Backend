@@ -247,44 +247,47 @@ async init(): Promise<void> {
   }
 
   // ========== BIDIRECTIONAL SYNC ==========
-  private async syncPlayersFromDatabase(): Promise<void> {
-    logger.info('Starting bidirectional sync: Database → Redis');
+private async syncPlayersFromDatabase(): Promise<void> {
+  logger.info('Starting bidirectional sync: Database → Redis');
+  
+  try {
+    logger.info('🔍 Getting online players from database...');
+    const players = await this.db.getAllOnlinePlayers();
+    logger.info('🔍 Found players in database', { count: players.length });
     
-    try {
-      const players = await this.db.getAllOnlinePlayers();
-      
-      if (players.length === 0) {
-        logger.info('No online players to sync');
-        return;
-      }
-
-      // Convert null values to undefined for Redis sync
-      const playersForSync = players.map(player => ({
-        player_uuid: player.player_uuid,
-        x: player.x,
-        y: player.y,
-        z: player.z,
-        chunk_x: player.chunk_x,
-        chunk_z: player.chunk_z,
-        last_updated: player.last_updated,
-        region_id: player.region_id ?? undefined,
-        node_id: player.node_id ?? undefined,
-        city_id: player.city_id ?? undefined
-      }));
-
-      const syncedCount = await this.redis.syncPlayersFromDatabase(playersForSync);
-      
-      logger.info('Database → Redis sync completed', { 
-        totalPlayers: players.length, 
-        syncedPlayers: syncedCount 
-      });
-    } catch (error) {
-      logger.error('Failed to sync players from database', { 
-        error: error instanceof Error ? error.message : 'Unknown error' 
-      });
-      throw error;
+    if (players.length === 0) {
+      logger.info('No online players to sync');
+      return;
     }
+
+    // Convert null values to undefined for Redis sync
+    const playersForSync = players.map(player => ({
+      player_uuid: player.player_uuid,
+      x: player.x,
+      y: player.y,
+      z: player.z,
+      chunk_x: player.chunk_x,
+      chunk_z: player.chunk_z,
+      last_updated: player.last_updated,
+      region_id: player.region_id ?? undefined,
+      node_id: player.node_id ?? undefined,
+      city_id: player.city_id ?? undefined
+    }));
+
+    logger.info('🔍 Syncing players to Redis...');
+    const syncedCount = await this.redis.syncPlayersFromDatabase(playersForSync);
+    
+    logger.info('Database → Redis sync completed', { 
+      totalPlayers: players.length, 
+      syncedPlayers: syncedCount 
+    });
+  } catch (error) {
+    logger.error('Failed to sync players from database', { 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
+    throw error;
   }
+}
 
   // ========== ✅ AUTO-RECALCUL ZONES (PostgreSQL Listener) ==========
   private async startPostgresListener(): Promise<void> {
