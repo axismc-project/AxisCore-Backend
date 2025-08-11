@@ -332,126 +332,169 @@ export class ZoneSyncService {
     }
   }
 
-  private async preCalculateAllChunks(): Promise<number> {
-    if (!this.calculatorService) {
-      logger.warn('❌ Calculator service not available');
-      return 0;
-    }
+private async preCalculateAllChunks(): Promise<number> {
+  logger.info('🧮 DIAGNOSTIC: Starting chunk pre-calculation');
+  
+  if (!this.calculatorService) {
+    logger.error('❌ DIAGNOSTIC: Calculator service is null/undefined');
+    return 0;
+  }
 
-    logger.info('🧮 Starting chunk pre-calculation for all zones');
+  logger.info('✅ DIAGNOSTIC: Calculator service is available');
 
-    let totalChunks = 0;
-    const batchSize = 500;
+  // Test if methods exist
+  logger.info('🔍 DIAGNOSTIC: Checking calculator methods', {
+    hasGetChunksInPolygon: typeof this.calculatorService.getChunksInPolygon === 'function',
+    hasGetChunksInPolygonOptimized: typeof this.calculatorService.getChunksInPolygonOptimized === 'function',
+    hasCalculateChunkZones: typeof this.calculatorService.calculateChunkZones === 'function'
+  });
 
-    try {
-      // ✅ FIX: Process ALL zones (regions, nodes, cities), not just regions
-      const allZones = [
-        ...this.regions.map(r => ({ ...r, type: 'region' as const })),
-        ...this.nodes.map(n => ({ ...n, type: 'node' as const })),
-        ...this.cities.map(c => ({ ...c, type: 'city' as const }))
-      ];
+  let totalChunks = 0;
+  const batchSize = 500;
 
-      logger.info(`🔄 Processing ${allZones.length} zones total`, {
-        regions: this.regions.length,
-        nodes: this.nodes.length,
-        cities: this.cities.length
-      });
+  try {
+    // Process ALL zones (regions, nodes, cities)
+    const allZones = [
+      ...this.regions.map(r => ({ ...r, type: 'region' as const })),
+      ...this.nodes.map(n => ({ ...n, type: 'node' as const })),
+      ...this.cities.map(c => ({ ...c, type: 'city' as const }))
+    ];
 
-      for (const zone of allZones) {
+    logger.info(`🔄 DIAGNOSTIC: Processing ${allZones.length} zones total`, {
+      regions: this.regions.length,
+      nodes: this.nodes.length,
+      cities: this.cities.length
+    });
+
+    for (const zone of allZones) {
+      try {
+        logger.info(`🔄 DIAGNOSTIC: Processing ${zone.type} "${zone.name}"`, {
+          id: zone.id,
+          boundaryPoints: zone.chunk_boundary?.length || 0,
+          samplePoints: zone.chunk_boundary?.slice(0, 3) || []
+        });
+
+        // Test polygon validity
+        if (!zone.chunk_boundary || !Array.isArray(zone.chunk_boundary)) {
+          logger.error(`❌ DIAGNOSTIC: Invalid boundary for ${zone.name}`);
+          continue;
+        }
+
+        if (zone.chunk_boundary.length < 3) {
+          logger.error(`❌ DIAGNOSTIC: Not enough points for ${zone.name}: ${zone.chunk_boundary.length}`);
+          continue;
+        }
+
+        logger.info(`✅ DIAGNOSTIC: Polygon valid for ${zone.name}, calculating chunks...`);
+
+        let zoneChunks: Array<{ x: number; z: number }> = [];
+        
         try {
-          logger.info(`🔄 Processing ${zone.type} "${zone.name}"`, {
-            id: zone.id,
-            boundaryPoints: zone.chunk_boundary?.length || 0
-          });
-
-          // ✅ FIX: Use the correct method name from ChunkCalculatorService
-          let zoneChunks: Array<{ x: number; z: number }> = [];
-          
-          try {
-            // Try the optimized version first
-            zoneChunks = this.calculatorService.getChunksInPolygonOptimized(zone.chunk_boundary);
-          } catch (error) {
-            logger.warn(`Optimized method failed for ${zone.name}, trying basic method`, { error });
-            // Fallback to basic method
-            zoneChunks = this.calculatorService.getChunksInPolygon(zone.chunk_boundary);
-          }
-
-          logger.info(`📊 ${zone.type} "${zone.name}" contains ${zoneChunks.length} chunks`);
-
-          if (zoneChunks.length === 0) {
-            logger.warn(`⚠️ No chunks found for ${zone.type} "${zone.name}" - check polygon validity`);
-            continue;
-          }
-
-          // Process chunks in batches
-          let zoneChunksProcessed = 0;
-          for (let i = 0; i < zoneChunks.length; i += batchSize) {
-            const batch = zoneChunks.slice(i, i + batchSize);
-            
-            const batchPromises = batch.map(async (chunk) => {
-              try {
-                const zoneData = this.calculatorService!.calculateChunkZones(
-                  chunk.x, chunk.z, 
-                  this.regions, this.nodes, this.cities
-                );
-
-                // Only cache if there's actual zone data
-                if (zoneData.regionId || zoneData.nodeId || zoneData.cityId) {
-                  await this.redisService.setChunkZone(chunk.x, chunk.z, zoneData);
-                  return 1;
-                }
-                return 0;
-              } catch (error) {
-                logger.debug(`❌ Failed to process chunk ${chunk.x},${chunk.z}:`, { 
-                  error: error instanceof Error ? error.message : 'Unknown error' 
-                });
-                return 0;
-              }
-            });
-
-            const batchResults = await Promise.allSettled(batchPromises);
-            const batchCount = batchResults
-              .filter(result => result.status === 'fulfilled')
-              .reduce((sum, result) => sum + (result as PromiseFulfilledResult<number>).value, 0);
-
-            zoneChunksProcessed += batchCount;
-            totalChunks += batchCount;
-
-            // Log progress for large zones
-            if (i % (batchSize * 10) === 0 && zoneChunks.length > batchSize * 10) {
-              logger.info(`🔄 ${zone.type} "${zone.name}": processed ${i + batch.length}/${zoneChunks.length} chunks`);
-            }
-          }
-
-          logger.info(`✅ ${zone.type} "${zone.name}": ${zoneChunksProcessed}/${zoneChunks.length} chunks cached successfully`);
-
+          // Try basic method first for testing
+          logger.info(`🔄 DIAGNOSTIC: Trying getChunksInPolygon for ${zone.name}`);
+          zoneChunks = this.calculatorService.getChunksInPolygon(zone.chunk_boundary);
+          logger.info(`✅ DIAGNOSTIC: getChunksInPolygon returned ${zoneChunks.length} chunks for ${zone.name}`);
         } catch (error) {
-          logger.error(`❌ Failed to process ${zone.type} "${zone.name}"`, { 
-            zoneId: zone.id,
+          logger.error(`❌ DIAGNOSTIC: getChunksInPolygon failed for ${zone.name}`, { 
             error: error instanceof Error ? error.message : 'Unknown error',
             stack: error instanceof Error ? error.stack : undefined
           });
+          
+          try {
+            logger.info(`🔄 DIAGNOSTIC: Trying getChunksInPolygonOptimized for ${zone.name}`);
+            zoneChunks = this.calculatorService.getChunksInPolygonOptimized(zone.chunk_boundary);
+            logger.info(`✅ DIAGNOSTIC: getChunksInPolygonOptimized returned ${zoneChunks.length} chunks for ${zone.name}`);
+          } catch (error2) {
+            logger.error(`❌ DIAGNOSTIC: Both methods failed for ${zone.name}`, { 
+              error: error2 instanceof Error ? error2.message : 'Unknown error' 
+            });
+            continue;
+          }
         }
+
+        if (zoneChunks.length === 0) {
+          logger.warn(`⚠️ DIAGNOSTIC: No chunks found for ${zone.type} "${zone.name}" - check polygon validity`);
+          continue;
+        }
+
+        logger.info(`📊 DIAGNOSTIC: ${zone.type} "${zone.name}" contains ${zoneChunks.length} chunks`);
+
+        // Test chunk calculation with first chunk
+        if (zoneChunks.length > 0) {
+          const testChunk = zoneChunks[0];
+          logger.info(`🧪 DIAGNOSTIC: Testing chunk calculation with chunk ${testChunk.x},${testChunk.z}`);
+          
+          try {
+            const zoneData = this.calculatorService.calculateChunkZones(
+              testChunk.x, testChunk.z, 
+              this.regions, this.nodes, this.cities
+            );
+            
+            logger.info(`✅ DIAGNOSTIC: Chunk calculation successful`, {
+              chunk: `${testChunk.x},${testChunk.z}`,
+              regionId: zoneData.regionId,
+              nodeId: zoneData.nodeId,
+              cityId: zoneData.cityId
+            });
+          } catch (error) {
+            logger.error(`❌ DIAGNOSTIC: Chunk calculation failed`, {
+              chunk: `${testChunk.x},${testChunk.z}`,
+              error: error instanceof Error ? error.message : 'Unknown error'
+            });
+          }
+        }
+
+        // Process only first 10 chunks for testing
+        const testChunks = zoneChunks.slice(0, Math.min(10, zoneChunks.length));
+        logger.info(`🔄 DIAGNOSTIC: Processing ${testChunks.length} test chunks for ${zone.name}`);
+
+        for (const chunk of testChunks) {
+          try {
+            const zoneData = this.calculatorService.calculateChunkZones(
+              chunk.x, chunk.z, 
+              this.regions, this.nodes, this.cities
+            );
+
+            if (zoneData.regionId || zoneData.nodeId || zoneData.cityId) {
+              await this.redisService.setChunkZone(chunk.x, chunk.z, zoneData);
+              totalChunks++;
+              logger.debug(`✅ DIAGNOSTIC: Cached chunk ${chunk.x},${chunk.z}`, zoneData);
+            } else {
+              logger.debug(`⚠️ DIAGNOSTIC: No zone data for chunk ${chunk.x},${chunk.z}`);
+            }
+          } catch (error) {
+            logger.error(`❌ DIAGNOSTIC: Failed to process chunk ${chunk.x},${chunk.z}`, { 
+              error: error instanceof Error ? error.message : 'Unknown error' 
+            });
+          }
+        }
+
+        logger.info(`✅ DIAGNOSTIC: ${zone.type} "${zone.name}": ${totalChunks} chunks processed so far`);
+
+      } catch (error) {
+        logger.error(`❌ DIAGNOSTIC: Failed to process ${zone.type} "${zone.name}"`, { 
+          zoneId: zone.id,
+          error: error instanceof Error ? error.message : 'Unknown error',
+          stack: error instanceof Error ? error.stack : undefined
+        });
       }
-
-      logger.info('✅ Chunk pre-calculation completed', {
-        totalChunks,
-        zonesProcessed: allZones.length,
-        regions: this.regions.length,
-        nodes: this.nodes.length,
-        cities: this.cities.length
-      });
-
-      return totalChunks;
-
-    } catch (error) {
-      logger.error('❌ Chunk pre-calculation failed', { 
-        error: error instanceof Error ? error.message : 'Unknown error',
-        stack: error instanceof Error ? error.stack : undefined
-      });
-      throw error;
     }
+
+    logger.info('✅ DIAGNOSTIC: Chunk pre-calculation completed', {
+      totalChunks,
+      zonesProcessed: allZones.length
+    });
+
+    return totalChunks;
+
+  } catch (error) {
+    logger.error('❌ DIAGNOSTIC: Chunk pre-calculation failed', { 
+      error: error instanceof Error ? error.message : 'Unknown error',
+      stack: error instanceof Error ? error.stack : undefined
+    });
+    throw error;
   }
+}
 
   private async cacheZoneMetadata(): Promise<void> {
     try {
