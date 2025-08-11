@@ -32,113 +32,117 @@ export class DatabaseService {
   }
 
   // Helper function to safely parse JSON
-  private safeJsonParse(jsonString: any, fallback: any = []): any {
-    try {
-      if (typeof jsonString === 'string') {
-        return JSON.parse(jsonString);
-      } else if (typeof jsonString === 'object' && jsonString !== null) {
-        // Already parsed by PostgreSQL driver
-        return jsonString;
-      } else {
-        logger.warn('Invalid JSON data type', { type: typeof jsonString, value: jsonString });
-        return fallback;
-      }
-    } catch (error) {
-      logger.error('Failed to parse JSON', { 
-        jsonString, 
-        error: error instanceof Error ? error.message : 'Unknown error' 
-      });
+  // Modifiez cette méthode dans DatabaseService.ts
+private safeJsonParse(jsonString: any, fallback: any = []): any {
+  try {
+    // ✅ FIX: Si c'est déjà un objet (PostgreSQL JSONB), le retourner tel quel
+    if (typeof jsonString === 'object' && jsonString !== null) {
+      return jsonString; // Déjà parsé par le driver PostgreSQL
+    } else if (typeof jsonString === 'string') {
+      return JSON.parse(jsonString); // Parse si c'est une string
+    } else {
+      logger.warn('Invalid JSON data type', { type: typeof jsonString, value: jsonString });
       return fallback;
     }
+  } catch (error) {
+    logger.error('Failed to parse JSON', { 
+      jsonString, 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
+    return fallback;
   }
+}
 
   // ========== ZONES ==========
-  async getAllRegions(): Promise<Region[]> {
-    const query = 'SELECT * FROM regions WHERE is_active = true ORDER BY name';
-    try {
-      const result = await this.pool.query(query);
-      return result.rows.map(row => {
-        try {
-          return {
-            ...row,
-            chunk_boundary: this.safeJsonParse(row.chunk_boundary, []),
-            created_at: new Date(row.created_at),
-            updated_at: new Date(row.updated_at)
-          };
-        } catch (error) {
-          logger.error('Failed to process region row', { 
-            regionId: row.id, 
-            regionName: row.name,
-            error: error instanceof Error ? error.message : 'Unknown error' 
-          });
-          throw error;
-        }
-      });
-    } catch (error) {
-      logger.error('Failed to fetch regions', { 
-        error: error instanceof Error ? error.message : 'Unknown error' 
-      });
-      throw new Error('Unable to fetch regions');
-    }
+async getAllRegions(): Promise<Region[]> {
+  const query = 'SELECT * FROM regions WHERE is_active = true ORDER BY name';
+  try {
+    const result = await this.pool.query(query);
+    return result.rows.map(row => {
+      try {
+        return {
+          ...row,
+          // ✅ FIX: JSONB est déjà un objet, pas besoin de parser
+          chunk_boundary: row.chunk_boundary || [],
+          created_at: new Date(row.created_at),
+          updated_at: new Date(row.updated_at)
+        };
+      } catch (error) {
+        logger.error('Failed to process region row', { 
+          regionId: row.id, 
+          regionName: row.name,
+          error: error instanceof Error ? error.message : 'Unknown error' 
+        });
+        throw error;
+      }
+    });
+  } catch (error) {
+    logger.error('Failed to fetch regions', { 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
+    throw new Error('Unable to fetch regions');
   }
+}
 
-  async getAllNodes(): Promise<Node[]> {
-    const query = 'SELECT * FROM nodes WHERE is_active = true ORDER BY region_id, name';
-    try {
-      const result = await this.pool.query(query);
-      return result.rows.map(row => {
-        try {
-          return {
-            ...row,
-            chunk_boundary: this.safeJsonParse(row.chunk_boundary, []),
-            created_at: new Date(row.created_at),
-            updated_at: new Date(row.updated_at)
-          };
-        } catch (error) {
-          logger.error('Failed to process node row', { 
-            nodeId: row.id, 
-            nodeName: row.name,
-            error: error instanceof Error ? error.message : 'Unknown error' 
-          });
-          throw error;
-        }
-      });
-    } catch (error) {
-      logger.error('Failed to fetch nodes', { 
-        error: error instanceof Error ? error.message : 'Unknown error' 
-      });
-      throw new Error('Unable to fetch nodes');
-    }
+async getAllNodes(): Promise<Node[]> {
+  const query = 'SELECT * FROM nodes WHERE is_active = true ORDER BY region_id, name';
+  try {
+    const result = await this.pool.query(query);
+    return result.rows.map(row => {
+      try {
+        return {
+          ...row,
+          // ✅ FIX: JSONB est déjà un objet
+          chunk_boundary: row.chunk_boundary || [],
+          created_at: new Date(row.created_at),
+          updated_at: new Date(row.updated_at)
+        };
+      } catch (error) {
+        logger.error('Failed to process node row', { 
+          nodeId: row.id, 
+          nodeName: row.name,
+          error: error instanceof Error ? error.message : 'Unknown error' 
+        });
+        throw error;
+      }
+    });
+  } catch (error) {
+    logger.error('Failed to fetch nodes', { 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
+    throw new Error('Unable to fetch nodes');
   }
+}
 
-  async getAllCities(): Promise<City[]> {
-    const query = 'SELECT * FROM cities WHERE is_active = true ORDER BY node_id, name';
-    try {
-      const result = await this.pool.query(query);
-      return result.rows.map(row => {
-        try {
-          return {
-            ...row,
-            chunk_boundary: this.safeJsonParse(row.chunk_boundary, []),
-            created_at: new Date(row.created_at),
-            updated_at: new Date(row.updated_at)
-          };
-        } catch (error) {
-          logger.error('Failed to process city row', { 
-            cityId: row.id, 
-            cityName: row.name,
-            error: error instanceof Error ? error.message : 'Unknown error' 
-          });
-          throw error;
-        }
-      });
-    } catch (error) {
-      logger.error('Failed to fetch cities', { 
-        error: error instanceof Error ? error.message : 'Unknown error' 
-      });
-      throw new Error('Unable to fetch cities');
-    }
+async getAllCities(): Promise<City[]> {
+  const query = 'SELECT * FROM cities WHERE is_active = true ORDER BY node_id, name';
+  try {
+    const result = await this.pool.query(query);
+    return result.rows.map(row => {
+      try {
+        return {
+          ...row,
+          // ✅ FIX: JSONB est déjà un objet
+          chunk_boundary: row.chunk_boundary || [],
+          created_at: new Date(row.created_at),
+          updated_at: new Date(row.updated_at)
+        };
+      } catch (error) {
+        logger.error('Failed to process city row', { 
+          cityId: row.id, 
+          cityName: row.name,
+          error: error instanceof Error ? error.message : 'Unknown error' 
+        });
+        throw error;
+      }
+    });
+  } catch (error) {
+    logger.error('Failed to fetch cities', { 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
+    throw new Error('Unable to fetch cities');
   }
+}
 
   async getAllOnlinePlayers(): Promise<Player[]> {
     const query = `
@@ -258,30 +262,31 @@ export class DatabaseService {
     }
   }
 
-  async getZoneById(zoneType: 'region' | 'node' | 'city', id: number): Promise<Region | Node | City | null> {
-    const tableName = zoneType === 'region' ? 'regions' : zoneType === 'node' ? 'nodes' : 'cities';
-    const query = `SELECT * FROM ${tableName} WHERE id = $1 AND is_active = true`;
+async getZoneById(zoneType: 'region' | 'node' | 'city', id: number): Promise<Region | Node | City | null> {
+  const tableName = zoneType === 'region' ? 'regions' : zoneType === 'node' ? 'nodes' : 'cities';
+  const query = `SELECT * FROM ${tableName} WHERE id = $1 AND is_active = true`;
 
-    try {
-      const result = await this.pool.query(query, [id]);
-      if (result.rows.length === 0) return null;
+  try {
+    const result = await this.pool.query(query, [id]);
+    if (result.rows.length === 0) return null;
 
-      const row = result.rows[0];
-      return {
-        ...row,
-        chunk_boundary: this.safeJsonParse(row.chunk_boundary, []),
-        created_at: new Date(row.created_at),
-        updated_at: new Date(row.updated_at)
-      };
-    } catch (error) {
-      logger.error('Failed to fetch zone by ID', { 
-        zoneType, 
-        zoneId: id, 
-        error: error instanceof Error ? error.message : 'Unknown error' 
-      });
-      throw new Error(`Unable to fetch zone ${zoneType}:${id}`);
-    }
+    const row = result.rows[0];
+    return {
+      ...row,
+      // ✅ FIX: JSONB déjà parsé
+      chunk_boundary: row.chunk_boundary || [],
+      created_at: new Date(row.created_at),
+      updated_at: new Date(row.updated_at)
+    };
+  } catch (error) {
+    logger.error('Failed to fetch zone by ID', { 
+      zoneType, 
+      zoneId: id, 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
+    throw new Error(`Unable to fetch zone ${zoneType}:${id}`);
   }
+}
 
   // ========== JOUEURS ==========
   async getPlayerByUuid(uuid: string): Promise<PlayerWithZones | null> {
