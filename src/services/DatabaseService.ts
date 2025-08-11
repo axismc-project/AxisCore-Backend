@@ -714,14 +714,14 @@ async createZone(
     } else if (zoneType === 'node') {
       query = `
         INSERT INTO nodes (name, description, region_id, chunk_boundary, boundary_cache, is_active)
-        VALUES ($1, $2, $3, $4, $5, 1, 0, true)
+        VALUES ($1, $2, $3, $4, $5, true)
         RETURNING id
       `;
       params = [name, description, parentId, JSON.stringify(polygon), JSON.stringify(polygon)];
     } else {
       query = `
         INSERT INTO cities (name, description, node_id, chunk_boundary, boundary_cache, is_active)
-        VALUES ($1, $2, $3, $4, $5, 1, 0, 100, true)
+        VALUES ($1, $2, $3, $4, $5, true)
         RETURNING id
       `;
       params = [name, description, parentId, JSON.stringify(polygon), JSON.stringify(polygon)];
