@@ -31,7 +31,6 @@ interface HealthStatus {
 }
 
 export class ZoneSyncService {
-  // ✅ FIX: Renommer la propriété privée pour éviter le conflit
   private serviceReady = false;
   private lastSyncTime: Date | null = null;
   private syncInProgress = false;
@@ -192,6 +191,39 @@ export class ZoneSyncService {
         totalZones: regions.length + nodes.length + cities.length
       });
 
+      // ✅ DEBUG: Log zone data to see what we actually have
+      this.regions.forEach((region, index) => {
+        logger.info(`🔍 Region ${index + 1}:`, {
+          id: region.id,
+          name: region.name,
+          boundaryPoints: region.chunk_boundary?.length || 0,
+          firstPoint: region.chunk_boundary?.[0],
+          isActive: region.is_active
+        });
+      });
+
+      this.nodes.forEach((node, index) => {
+        logger.info(`🔍 Node ${index + 1}:`, {
+          id: node.id,
+          name: node.name,
+          regionId: node.region_id,
+          boundaryPoints: node.chunk_boundary?.length || 0,
+          firstPoint: node.chunk_boundary?.[0],
+          isActive: node.is_active
+        });
+      });
+
+      this.cities.forEach((city, index) => {
+        logger.info(`🔍 City ${index + 1}:`, {
+          id: city.id,
+          name: city.name,
+          nodeId: city.node_id,
+          boundaryPoints: city.chunk_boundary?.length || 0,
+          firstPoint: city.chunk_boundary?.[0],
+          isActive: city.is_active
+        });
+      });
+
     } catch (error) {
       logger.error('❌ Failed to load zones from database', { 
         error: error instanceof Error ? error.message : 'Unknown error' 
@@ -249,13 +281,16 @@ export class ZoneSyncService {
     try {
       // Check if chunk_boundary exists and is array
       if (!zone.chunk_boundary || !Array.isArray(zone.chunk_boundary)) {
-        logger.warn(`${zoneType} ${zone.name} has invalid chunk_boundary - not an array`);
+        logger.warn(`❌ ${zoneType} ${zone.name} has invalid chunk_boundary - not an array`, {
+          boundaryType: typeof zone.chunk_boundary,
+          boundaryValue: zone.chunk_boundary
+        });
         return false;
       }
 
       // Check minimum points for polygon
       if (zone.chunk_boundary.length < 3) {
-        logger.warn(`${zoneType} ${zone.name} has insufficient points: ${zone.chunk_boundary.length}`);
+        logger.warn(`❌ ${zoneType} ${zone.name} has insufficient points: ${zone.chunk_boundary.length}`);
         return false;
       }
 
@@ -264,44 +299,94 @@ export class ZoneSyncService {
         const point = zone.chunk_boundary[i];
         
         if (!Array.isArray(point) || point.length !== 2) {
-          logger.warn(`${zoneType} ${zone.name} point ${i} is invalid format`);
+          logger.warn(`❌ ${zoneType} ${zone.name} point ${i} is invalid format:`, {
+            point,
+            isArray: Array.isArray(point),
+            length: point?.length
+          });
           return false;
         }
 
         const [x, z] = point;
         if (typeof x !== 'number' || typeof z !== 'number' || !isFinite(x) || !isFinite(z)) {
-          logger.warn(`${zoneType} ${zone.name} point ${i} has invalid coordinates: [${x}, ${z}]`);
+          logger.warn(`❌ ${zoneType} ${zone.name} point ${i} has invalid coordinates:`, {
+            x, z,
+            xType: typeof x,
+            zType: typeof z,
+            xFinite: isFinite(x),
+            zFinite: isFinite(z)
+          });
           return false;
         }
       }
 
+      logger.info(`✅ ${zoneType} ${zone.name} validation passed`, {
+        points: zone.chunk_boundary.length,
+        samplePoint: zone.chunk_boundary[0]
+      });
+
       return true;
     } catch (error) {
-      logger.warn(`${zoneType} ${zone.name} validation error: ${error}`);
+      logger.warn(`❌ ${zoneType} ${zone.name} validation error: ${error}`);
       return false;
     }
   }
 
   private async preCalculateAllChunks(): Promise<number> {
     if (!this.calculatorService) {
-      logger.warn('Calculator service not available');
+      logger.warn('❌ Calculator service not available');
       return 0;
     }
 
     logger.info('🧮 Starting chunk pre-calculation for all zones');
 
     let totalChunks = 0;
-    const batchSize = 500; // Process chunks in batches
+    const batchSize = 500;
 
     try {
-      // Process each region and its contained zones
-      for (const region of this.regions) {
+      // ✅ FIX: Process ALL zones (regions, nodes, cities), not just regions
+      const allZones = [
+        ...this.regions.map(r => ({ ...r, type: 'region' as const })),
+        ...this.nodes.map(n => ({ ...n, type: 'node' as const })),
+        ...this.cities.map(c => ({ ...c, type: 'city' as const }))
+      ];
+
+      logger.info(`🔄 Processing ${allZones.length} zones total`, {
+        regions: this.regions.length,
+        nodes: this.nodes.length,
+        cities: this.cities.length
+      });
+
+      for (const zone of allZones) {
         try {
-          const regionChunks = this.calculatorService.getChunksInPolygon(region.chunk_boundary);
+          logger.info(`🔄 Processing ${zone.type} "${zone.name}"`, {
+            id: zone.id,
+            boundaryPoints: zone.chunk_boundary?.length || 0
+          });
+
+          // ✅ FIX: Use the correct method name from ChunkCalculatorService
+          let zoneChunks: Array<{ x: number; z: number }> = [];
           
+          try {
+            // Try the optimized version first
+            zoneChunks = this.calculatorService.getChunksInPolygonOptimized(zone.chunk_boundary);
+          } catch (error) {
+            logger.warn(`Optimized method failed for ${zone.name}, trying basic method`, { error });
+            // Fallback to basic method
+            zoneChunks = this.calculatorService.getChunksInPolygon(zone.chunk_boundary);
+          }
+
+          logger.info(`📊 ${zone.type} "${zone.name}" contains ${zoneChunks.length} chunks`);
+
+          if (zoneChunks.length === 0) {
+            logger.warn(`⚠️ No chunks found for ${zone.type} "${zone.name}" - check polygon validity`);
+            continue;
+          }
+
           // Process chunks in batches
-          for (let i = 0; i < regionChunks.length; i += batchSize) {
-            const batch = regionChunks.slice(i, i + batchSize);
+          let zoneChunksProcessed = 0;
+          for (let i = 0; i < zoneChunks.length; i += batchSize) {
+            const batch = zoneChunks.slice(i, i + batchSize);
             
             const batchPromises = batch.map(async (chunk) => {
               try {
@@ -310,13 +395,16 @@ export class ZoneSyncService {
                   this.regions, this.nodes, this.cities
                 );
 
+                // Only cache if there's actual zone data
                 if (zoneData.regionId || zoneData.nodeId || zoneData.cityId) {
                   await this.redisService.setChunkZone(chunk.x, chunk.z, zoneData);
                   return 1;
                 }
                 return 0;
               } catch (error) {
-                logger.debug(`Failed to process chunk ${chunk.x},${chunk.z}`, { error });
+                logger.debug(`❌ Failed to process chunk ${chunk.x},${chunk.z}:`, { 
+                  error: error instanceof Error ? error.message : 'Unknown error' 
+                });
                 return 0;
               }
             });
@@ -326,26 +414,29 @@ export class ZoneSyncService {
               .filter(result => result.status === 'fulfilled')
               .reduce((sum, result) => sum + (result as PromiseFulfilledResult<number>).value, 0);
 
+            zoneChunksProcessed += batchCount;
             totalChunks += batchCount;
 
-            // Log progress for large regions
-            if (i % (batchSize * 10) === 0 && regionChunks.length > batchSize * 10) {
-              logger.debug(`Region ${region.name}: processed ${i + batch.length}/${regionChunks.length} chunks`);
+            // Log progress for large zones
+            if (i % (batchSize * 10) === 0 && zoneChunks.length > batchSize * 10) {
+              logger.info(`🔄 ${zone.type} "${zone.name}": processed ${i + batch.length}/${zoneChunks.length} chunks`);
             }
           }
 
-          logger.debug(`Region ${region.name}: ${regionChunks.length} chunks processed`);
+          logger.info(`✅ ${zone.type} "${zone.name}": ${zoneChunksProcessed}/${zoneChunks.length} chunks cached successfully`);
 
         } catch (error) {
-          logger.error(`Failed to process region ${region.name}`, { 
-            regionId: region.id,
-            error: error instanceof Error ? error.message : 'Unknown error' 
+          logger.error(`❌ Failed to process ${zone.type} "${zone.name}"`, { 
+            zoneId: zone.id,
+            error: error instanceof Error ? error.message : 'Unknown error',
+            stack: error instanceof Error ? error.stack : undefined
           });
         }
       }
 
       logger.info('✅ Chunk pre-calculation completed', {
         totalChunks,
+        zonesProcessed: allZones.length,
         regions: this.regions.length,
         nodes: this.nodes.length,
         cities: this.cities.length
@@ -355,7 +446,8 @@ export class ZoneSyncService {
 
     } catch (error) {
       logger.error('❌ Chunk pre-calculation failed', { 
-        error: error instanceof Error ? error.message : 'Unknown error' 
+        error: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined
       });
       throw error;
     }
@@ -603,7 +695,6 @@ export class ZoneSyncService {
   }
 
   // ========== STATUS AND MONITORING ==========
-  // ✅ FIX: Méthode publique qui retourne la valeur de la propriété privée
   isReady(): boolean {
     return this.serviceReady;
   }
