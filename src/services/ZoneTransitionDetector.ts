@@ -15,8 +15,8 @@ export interface ZoneTransition {
 export class ZoneTransitionDetector {
   
   /**
-   * 🎯 MÉTHODE PRINCIPALE : Détecte les transitions de zones
-   * Version simplifiée et debuggée pour résoudre le problème "plus aucun message"
+   * 🎯 MÉTHODE PRINCIPALE : Détecte VRAIMENT les transitions de zones
+   * Version ultra-simplifiée qui se concentre sur l'essentiel
    */
   detectTransitions(
     playerUuid: string,
@@ -24,169 +24,137 @@ export class ZoneTransitionDetector {
     currentZones: ChunkZoneData | null
   ): ZoneTransition | null {
     
-    // 🔍 LOG INITIAL COMPLET
-    logger.info('🔍 TRANSITION DETECTOR START', {
+    // 🔍 LOG INITIAL ULTRA-DÉTAILLÉ
+    logger.info('🎯 TRANSITION DETECTOR - ULTRA DEBUG', {
       playerUuid,
       input: {
-        previous: this.safeFormatZones(previousZones),
-        current: this.safeFormatZones(currentZones)
-      },
-      rawData: {
-        previous: previousZones,
-        current: currentZones
+        previous: {
+          raw: previousZones,
+          formatted: this.formatZones(previousZones),
+          isWilderness: this.isWilderness(previousZones)
+        },
+        current: {
+          raw: currentZones,
+          formatted: this.formatZones(currentZones),
+          isWilderness: this.isWilderness(currentZones)
+        }
       }
     });
 
-    // 🧪 ANALYSE PRÉLIMINAIRE
-    const previousIsWilderness = this.isWilderness(previousZones);
-    const currentIsWilderness = this.isWilderness(currentZones);
-    const zonesAreIdentical = this.areZonesIdentical(previousZones, currentZones);
-
-    logger.info('🧪 PRELIMINARY ANALYSIS', {
+    // 🚨 NOUVEAU : Comparer zone par zone MANUELLEMENT
+    const changes = this.detectDetailedChanges(previousZones, currentZones);
+    
+    logger.info('🔍 DETAILED ZONE CHANGES', {
       playerUuid,
-      analysis: {
-        previousIsWilderness,
-        currentIsWilderness,
-        zonesAreIdentical,
-        bothWilderness: previousIsWilderness && currentIsWilderness
-      }
+      changes,
+      hasAnyChange: changes.region.hasChange || changes.node.hasChange || changes.city.hasChange
     });
 
-    // ❌ FILTRE 1: Wilderness → Wilderness
-    if (previousIsWilderness && currentIsWilderness) {
-      logger.info('🚫 FILTER 1: Wilderness → Wilderness', { 
+    // ❌ FILTRE PRINCIPAL : Aucun changement détecté
+    if (!changes.region.hasChange && !changes.node.hasChange && !changes.city.hasChange) {
+      logger.info('🚫 NO CHANGES DETECTED', {
         playerUuid,
-        reason: 'Both positions are in wilderness - no zones involved'
+        reason: 'All zones remain the same',
+        details: changes
       });
       return null;
     }
 
-    // ❌ FILTRE 2: Zones exactement identiques
-    if (zonesAreIdentical) {
-      logger.info('🚫 FILTER 2: Identical zones', { 
-        playerUuid,
-        zones: this.safeFormatZones(currentZones),
-        reason: 'Player remains in exactly the same zones'
-      });
-      return null;
-    }
-
-    // ✅ IL Y A UNE DIFFÉRENCE → Analyser les transitions
-    logger.info('✅ DIFFERENCE DETECTED - Analyzing individual zone transitions', {
+    // ✅ DES CHANGEMENTS DÉTECTÉS → Générer les transitions
+    logger.info('✅ ZONE CHANGES DETECTED - Generating transitions', {
       playerUuid,
-      from: this.safeFormatZones(previousZones),
-      to: this.safeFormatZones(currentZones)
+      changesDetected: {
+        region: changes.region.hasChange,
+        node: changes.node.hasChange,
+        city: changes.city.hasChange
+      }
     });
 
     const transitions: ZoneTransition['transitions'] = {};
     let transitionCount = 0;
 
-    // 🔍 ANALYSER RÉGION
-    const regionTransition = this.analyzeZoneTransition(
-      'region',
-      previousZones?.regionId || null,
-      currentZones?.regionId || null,
-      currentZones?.regionName || null
-    );
-
-    if (regionTransition) {
-      transitions.region = regionTransition;
-      transitionCount++;
-      logger.info('✅ REGION TRANSITION', {
-        playerUuid,
-        transition: regionTransition,
-        details: {
-          from: previousZones?.regionId || 'null',
-          to: currentZones?.regionId || 'null'
+    // 🎯 RÉGION : Générer les transitions
+    if (changes.region.hasChange) {
+      const regionTransitions = this.generateTransitionsForZone(
+        'region',
+        changes.region.previous,
+        changes.region.current,
+        currentZones?.regionName || null
+      );
+      
+      regionTransitions.forEach(transition => {
+        if (transition.type === 'enter') {
+          transitions.region = transition;
+          transitionCount++;
+          logger.info('✅ REGION TRANSITION GENERATED', {
+            playerUuid,
+            transition
+          });
         }
-      });
-    } else {
-      logger.debug('➖ No region transition', {
-        playerUuid,
-        from: previousZones?.regionId || 'null',
-        to: currentZones?.regionId || 'null'
       });
     }
 
-    // 🔍 ANALYSER NODE
-    const nodeTransition = this.analyzeZoneTransition(
-      'node',
-      previousZones?.nodeId || null,
-      currentZones?.nodeId || null,
-      currentZones?.nodeName || null
-    );
-
-    if (nodeTransition) {
-      transitions.node = nodeTransition;
-      transitionCount++;
-      logger.info('✅ NODE TRANSITION', {
-        playerUuid,
-        transition: nodeTransition,
-        details: {
-          from: previousZones?.nodeId || 'null',
-          to: currentZones?.nodeId || 'null'
+    // 🎯 NODE : Générer les transitions
+    if (changes.node.hasChange) {
+      const nodeTransitions = this.generateTransitionsForZone(
+        'node',
+        changes.node.previous,
+        changes.node.current,
+        currentZones?.nodeName || null
+      );
+      
+      nodeTransitions.forEach(transition => {
+        if (transition.type === 'enter') {
+          transitions.node = transition;
+          transitionCount++;
+          logger.info('✅ NODE TRANSITION GENERATED', {
+            playerUuid,
+            transition
+          });
         }
-      });
-    } else {
-      logger.debug('➖ No node transition', {
-        playerUuid,
-        from: previousZones?.nodeId || 'null',
-        to: currentZones?.nodeId || 'null'
       });
     }
 
-    // 🔍 ANALYSER VILLE
-    const cityTransition = this.analyzeZoneTransition(
-      'city',
-      previousZones?.cityId || null,
-      currentZones?.cityId || null,
-      currentZones?.cityName || null
-    );
-
-    if (cityTransition) {
-      transitions.city = cityTransition;
-      transitionCount++;
-      logger.info('✅ CITY TRANSITION', {
-        playerUuid,
-        transition: cityTransition,
-        details: {
-          from: previousZones?.cityId || 'null',
-          to: currentZones?.cityId || 'null'
+    // 🎯 VILLE : Générer les transitions
+    if (changes.city.hasChange) {
+      const cityTransitions = this.generateTransitionsForZone(
+        'city',
+        changes.city.previous,
+        changes.city.current,
+        currentZones?.cityName || null
+      );
+      
+      cityTransitions.forEach(transition => {
+        if (transition.type === 'enter') {
+          transitions.city = transition;
+          transitionCount++;
+          logger.info('✅ CITY TRANSITION GENERATED', {
+            playerUuid,
+            transition
+          });
         }
-      });
-    } else {
-      logger.debug('➖ No city transition', {
-        playerUuid,
-        from: previousZones?.cityId || 'null',
-        to: currentZones?.cityId || 'null'
       });
     }
 
     // 📊 RÉSULTAT FINAL
     if (transitionCount === 0) {
-      logger.info('🚫 FINAL RESULT: No transitions found', {
+      logger.warn('⚠️ WEIRD: Changes detected but no transitions generated', {
         playerUuid,
-        reason: 'After analyzing all zone types, no transitions were detected',
-        analyzed: {
-          region: !!regionTransition,
-          node: !!nodeTransition,
-          city: !!cityTransition
-        },
-        note: 'This might indicate a logic issue if you expected a transition'
+        changes,
+        note: 'This might indicate a logic issue'
       });
       return null;
     }
 
-    // ✅ TRANSITIONS TROUVÉES !
-    logger.info('🎉 FINAL RESULT: TRANSITIONS DETECTED!', {
+    // 🎉 TRANSITIONS CONFIRMÉES
+    logger.info('🎉 TRANSITIONS READY FOR WEBSOCKET', {
       playerUuid,
       transitionCount,
+      transitions,
       summary: Object.entries(transitions).map(([type, data]) => 
         `${type}: ${data.type} → ${data.zoneName} (ID: ${data.zoneId})`
       ),
-      from: this.safeFormatZones(previousZones),
-      to: this.safeFormatZones(currentZones),
-      willTriggerWebSocket: true
+      willBroadcast: true
     });
 
     return {
@@ -198,139 +166,135 @@ export class ZoneTransitionDetector {
   }
 
   /**
-   * 🔍 Analyse la transition pour UN type de zone spécifique
-   * Logic simplifiée et claire
+   * 🔍 NOUVELLE MÉTHODE : Détecte les changements détaillés zone par zone
    */
-  private analyzeZoneTransition(
-    zoneType: 'region' | 'node' | 'city',
-    previousZoneId: number | null,
-    currentZoneId: number | null,
-    currentZoneName: string | null
-  ): { type: 'enter' | 'leave'; zoneId: number; zoneName: string } | null {
+  private detectDetailedChanges(
+    previousZones: ChunkZoneData | null,
+    currentZones: ChunkZoneData | null
+  ): {
+    region: { hasChange: boolean; previous: number | null; current: number | null };
+    node: { hasChange: boolean; previous: number | null; current: number | null };
+    city: { hasChange: boolean; previous: number | null; current: number | null };
+  } {
     
-    logger.debug(`🔍 Analyzing ${zoneType} transition`, {
-      previous: previousZoneId,
-      current: currentZoneId,
-      currentName: currentZoneName
+    const previousRegion = previousZones?.regionId || null;
+    const currentRegion = currentZones?.regionId || null;
+    const previousNode = previousZones?.nodeId || null;
+    const currentNode = currentZones?.nodeId || null;
+    const previousCity = previousZones?.cityId || null;
+    const currentCity = currentZones?.cityId || null;
+
+    const changes = {
+      region: {
+        hasChange: previousRegion !== currentRegion,
+        previous: previousRegion,
+        current: currentRegion
+      },
+      node: {
+        hasChange: previousNode !== currentNode,
+        previous: previousNode,
+        current: currentNode
+      },
+      city: {
+        hasChange: previousCity !== currentCity,
+        previous: previousCity,
+        current: currentCity
+      }
+    };
+
+    logger.debug('🧪 CHANGE ANALYSIS', {
+      region: `${previousRegion} → ${currentRegion} (${changes.region.hasChange ? 'CHANGED' : 'SAME'})`,
+      node: `${previousNode} → ${currentNode} (${changes.node.hasChange ? 'CHANGED' : 'SAME'})`,
+      city: `${previousCity} → ${currentCity} (${changes.city.hasChange ? 'CHANGED' : 'SAME'})`
+    });
+
+    return changes;
+  }
+
+  /**
+   * 🎯 NOUVELLE MÉTHODE : Génère les transitions pour un type de zone
+   */
+  private generateTransitionsForZone(
+    zoneType: 'region' | 'node' | 'city',
+    previousId: number | null,
+    currentId: number | null,
+    currentName: string | null
+  ): Array<{ type: 'enter' | 'leave'; zoneId: number; zoneName: string }> {
+    
+    const transitions: Array<{ type: 'enter' | 'leave'; zoneId: number; zoneName: string }> = [];
+
+    logger.debug(`🎯 Generating ${zoneType} transitions`, {
+      previous: previousId,
+      current: currentId,
+      currentName
     });
 
     // Cas 1: null → zone (ENTER)
-    if (previousZoneId === null && currentZoneId !== null) {
-      const result = {
+    if (previousId === null && currentId !== null) {
+      const enterTransition = {
         type: 'enter' as const,
-        zoneId: currentZoneId,
-        zoneName: currentZoneName || `${this.capitalize(zoneType)} ${currentZoneId}`
+        zoneId: currentId,
+        zoneName: currentName || `${this.capitalize(zoneType)} ${currentId}`
       };
-      logger.debug(`✅ ${zoneType.toUpperCase()} ENTER detected`, result);
-      return result;
+      transitions.push(enterTransition);
+      logger.debug(`✅ ${zoneType.toUpperCase()} ENTER: null → ${currentId}`, enterTransition);
     }
 
     // Cas 2: zone → null (LEAVE)
-    if (previousZoneId !== null && currentZoneId === null) {
-      const result = {
+    else if (previousId !== null && currentId === null) {
+      const leaveTransition = {
         type: 'leave' as const,
-        zoneId: previousZoneId,
-        zoneName: `${this.capitalize(zoneType)} ${previousZoneId}`
+        zoneId: previousId,
+        zoneName: `${this.capitalize(zoneType)} ${previousId}`
       };
-      logger.debug(`✅ ${zoneType.toUpperCase()} LEAVE detected`, result);
-      return result;
+      transitions.push(leaveTransition);
+      logger.debug(`✅ ${zoneType.toUpperCase()} LEAVE: ${previousId} → null`, leaveTransition);
     }
 
-    // Cas 3: zone A → zone B (ENTER dans la nouvelle)
-    if (previousZoneId !== null && currentZoneId !== null && previousZoneId !== currentZoneId) {
-      const result = {
+    // Cas 3: zone A → zone B (ENTER dans la nouvelle, le LEAVE sera géré séparément)
+    else if (previousId !== null && currentId !== null && previousId !== currentId) {
+      const enterTransition = {
         type: 'enter' as const,
-        zoneId: currentZoneId,
-        zoneName: currentZoneName || `${this.capitalize(zoneType)} ${currentZoneId}`
+        zoneId: currentId,
+        zoneName: currentName || `${this.capitalize(zoneType)} ${currentId}`
       };
-      logger.debug(`✅ ${zoneType.toUpperCase()} CHANGE detected (${previousZoneId} → ${currentZoneId})`, result);
-      return result;
+      transitions.push(enterTransition);
+      logger.debug(`✅ ${zoneType.toUpperCase()} CHANGE: ${previousId} → ${currentId}`, enterTransition);
     }
 
-    // Cas 4: Pas de changement
-    logger.debug(`➖ No ${zoneType} change (${previousZoneId} → ${currentZoneId})`);
-    return null;
+    // Cas 4: Même zone (ne devrait pas arriver car detectDetailedChanges filtre)
+    else {
+      logger.debug(`➖ ${zoneType.toUpperCase()}: No transition needed (${previousId} → ${currentId})`);
+    }
+
+    return transitions;
   }
 
-  // ========== MÉTHODES UTILITAIRES SÉCURISÉES ==========
+  // ========== MÉTHODES UTILITAIRES SIMPLIFIÉES ==========
 
   /**
-   * Vérifie si une position est dans le wilderness (SÉCURISÉ)
+   * Vérifie si une position est dans le wilderness
    */
   private isWilderness(zones: ChunkZoneData | null): boolean {
-    if (!zones) {
-      return true;
-    }
-
-    // Une position est wilderness si elle n'a AUCUNE zone
-    const hasAnyZone = (zones.regionId !== null && zones.regionId !== undefined) ||
-                       (zones.nodeId !== null && zones.nodeId !== undefined) ||
-                       (zones.cityId !== null && zones.cityId !== undefined);
+    if (!zones) return true;
     
-    return !hasAnyZone;
+    return !zones.regionId && !zones.nodeId && !zones.cityId;
   }
 
   /**
-   * Vérifie si deux ensembles de zones sont identiques (SÉCURISÉ)
+   * Formate les zones pour l'affichage
    */
-  private areZonesIdentical(zones1: ChunkZoneData | null, zones2: ChunkZoneData | null): boolean {
-    // Cas 1: Les deux sont null/undefined
-    if (!zones1 && !zones2) {
-      return true;
-    }
-
-    // Cas 2: Un seul est null/undefined
-    if (!zones1 || !zones2) {
-      return false;
-    }
-
-    // Cas 3: Comparaison détaillée des IDs
-    const region1 = zones1.regionId || null;
-    const region2 = zones2.regionId || null;
-    const node1 = zones1.nodeId || null;
-    const node2 = zones2.nodeId || null;
-    const city1 = zones1.cityId || null;
-    const city2 = zones2.cityId || null;
-
-    const identical = region1 === region2 && node1 === node2 && city1 === city2;
-
-    logger.debug('🔍 Zone comparison', {
-      zones1: { region: region1, node: node1, city: city1 },
-      zones2: { region: region2, node: node2, city: city2 },
-      identical
-    });
-
-    return identical;
-  }
-
-  /**
-   * Formate les zones de manière sécurisée pour l'affichage
-   */
-  private safeFormatZones(zones: ChunkZoneData | null): string {
-    if (!zones) {
+  private formatZones(zones: ChunkZoneData | null): string {
+    if (!zones || this.isWilderness(zones)) {
       return 'wilderness';
     }
-
-    try {
-      const parts: string[] = [];
-      
-      if (zones.regionId) {
-        parts.push(`R${zones.regionId}${zones.regionName ? ` (${zones.regionName})` : ''}`);
-      }
-      
-      if (zones.nodeId) {
-        parts.push(`N${zones.nodeId}${zones.nodeName ? ` (${zones.nodeName})` : ''}`);
-      }
-      
-      if (zones.cityId) {
-        parts.push(`C${zones.cityId}${zones.cityName ? ` (${zones.cityName})` : ''}`);
-      }
-      
-      return parts.length > 0 ? parts.join(' → ') : 'wilderness';
-    } catch (error) {
-      logger.warn('Error formatting zones', { zones, error });
-      return 'format_error';
-    }
+    
+    const parts: string[] = [];
+    if (zones.regionId) parts.push(`R${zones.regionId}${zones.regionName ? ` (${zones.regionName})` : ''}`);
+    if (zones.nodeId) parts.push(`N${zones.nodeId}${zones.nodeName ? ` (${zones.nodeName})` : ''}`);
+    if (zones.cityId) parts.push(`C${zones.cityId}${zones.cityName ? ` (${zones.cityName})` : ''}`);
+    
+    return parts.length > 0 ? parts.join(' → ') : 'wilderness';
   }
 
   /**
@@ -341,114 +305,80 @@ export class ZoneTransitionDetector {
   }
 
   /**
-   * Méthode publique pour formater les zones (utilisée par ZoneSyncService)
+   * Méthode publique pour formater les zones
    */
   zonesToString(zones: ChunkZoneData | null): string {
-    return this.safeFormatZones(zones);
+    return this.formatZones(zones);
   }
 
-  // ========== MÉTHODES DE TEST ET DEBUG ==========
+  // ========== MÉTHODES DE TEST SIMPLIFIÉES ==========
 
   /**
-   * 🧪 Test rapide des transitions
+   * 🧪 Test simple et direct
    */
-  testBasicTransitions(): void {
-    logger.info('🧪 TESTING BASIC TRANSITIONS');
+  testSimpleTransitions(): void {
+    logger.info('🧪 TESTING SIMPLE TRANSITIONS');
 
-    const testCases = [
-      {
-        name: 'Wilderness → Wilderness',
-        previous: null,
-        current: null,
-        expected: false
-      },
-      {
-        name: 'Wilderness → Region 1',
-        previous: null,
-        current: { regionId: 1, regionName: 'Test Region', nodeId: null, nodeName: null, cityId: null, cityName: null },
-        expected: true
-      },
-      {
-        name: 'Region 1 → Wilderness',
-        previous: { regionId: 1, regionName: 'Test Region', nodeId: null, nodeName: null, cityId: null, cityName: null },
-        current: null,
-        expected: true
-      },
-      {
-        name: 'Same Region',
-        previous: { regionId: 1, regionName: 'Test Region', nodeId: null, nodeName: null, cityId: null, cityName: null },
-        current: { regionId: 1, regionName: 'Test Region', nodeId: null, nodeName: null, cityId: null, cityName: null },
-        expected: false
-      },
-      {
-        name: 'Region 1 → Region 2',
-        previous: { regionId: 1, regionName: 'Region 1', nodeId: null, nodeName: null, cityId: null, cityName: null },
-        current: { regionId: 2, regionName: 'Region 2', nodeId: null, nodeName: null, cityId: null, cityName: null },
-        expected: true
-      }
-    ];
+    // Test 1: Wilderness → Region
+    logger.info('🧪 TEST 1: Wilderness → Region');
+    const test1 = this.detectTransitions(
+      'test1',
+      null,
+      { regionId: 1, regionName: 'Test Region', nodeId: null, nodeName: null, cityId: null, cityName: null }
+    );
+    logger.info(`TEST 1 RESULT: ${test1 ? 'TRANSITION DETECTED ✅' : 'NO TRANSITION ❌'}`, { result: test1 });
 
-    testCases.forEach((testCase, index) => {
-      const result = this.detectTransitions(`test_player_${index}`, testCase.previous, testCase.current);
-      const hasTransition = !!result;
-      const success = hasTransition === testCase.expected;
+    // Test 2: Region → Wilderness
+    logger.info('🧪 TEST 2: Region → Wilderness');
+    const test2 = this.detectTransitions(
+      'test2',
+      { regionId: 1, regionName: 'Test Region', nodeId: null, nodeName: null, cityId: null, cityName: null },
+      null
+    );
+    logger.info(`TEST 2 RESULT: ${test2 ? 'TRANSITION DETECTED ✅' : 'NO TRANSITION ❌'}`, { result: test2 });
 
-      logger.info(`${success ? '✅' : '❌'} TEST ${index + 1}: ${testCase.name}`, {
-        expected: testCase.expected ? 'transition' : 'no transition',
-        actual: hasTransition ? 'transition' : 'no transition',
-        success,
-        result: result ? {
-          transitionsCount: Object.keys(result.transitions).length,
-          transitions: result.transitions
-        } : null
-      });
-    });
+    // Test 3: Same region (should be no transition)
+    logger.info('🧪 TEST 3: Same Region');
+    const test3 = this.detectTransitions(
+      'test3',
+      { regionId: 1, regionName: 'Test Region', nodeId: null, nodeName: null, cityId: null, cityName: null },
+      { regionId: 1, regionName: 'Test Region', nodeId: null, nodeName: null, cityId: null, cityName: null }
+    );
+    logger.info(`TEST 3 RESULT: ${test3 ? 'TRANSITION DETECTED ❌' : 'NO TRANSITION ✅'}`, { result: test3 });
 
-    logger.info('🧪 TEST COMPLETED');
+    // Test 4: Region A → Region B
+    logger.info('🧪 TEST 4: Region A → Region B');
+    const test4 = this.detectTransitions(
+      'test4',
+      { regionId: 1, regionName: 'Region A', nodeId: null, nodeName: null, cityId: null, cityName: null },
+      { regionId: 2, regionName: 'Region B', nodeId: null, nodeName: null, cityId: null, cityName: null }
+    );
+    logger.info(`TEST 4 RESULT: ${test4 ? 'TRANSITION DETECTED ✅' : 'NO TRANSITION ❌'}`, { result: test4 });
+
+    logger.info('🧪 SIMPLE TESTS COMPLETED');
   }
 
   /**
-   * 🔍 Diagnostic d'une transition spécifique
+   * 🔍 Diagnostic direct d'une transition
    */
-  diagnoseTransition(
+  diagnose(
     playerUuid: string,
     previousZones: ChunkZoneData | null,
     currentZones: ChunkZoneData | null
-  ): {
-    shouldHaveTransition: boolean;
-    reason: string;
-    details: any;
-  } {
-    const previousIsWilderness = this.isWilderness(previousZones);
-    const currentIsWilderness = this.isWilderness(currentZones);
-    const zonesAreIdentical = this.areZonesIdentical(previousZones, currentZones);
-
-    if (previousIsWilderness && currentIsWilderness) {
-      return {
-        shouldHaveTransition: false,
-        reason: 'Both positions are wilderness',
-        details: { previousIsWilderness, currentIsWilderness }
-      };
-    }
-
-    if (zonesAreIdentical) {
-      return {
-        shouldHaveTransition: false,
-        reason: 'Zones are identical',
-        details: { previousZones, currentZones, zonesAreIdentical }
-      };
-    }
-
-    return {
-      shouldHaveTransition: true,
-      reason: 'Zones are different',
-      details: {
-        previous: this.safeFormatZones(previousZones),
-        current: this.safeFormatZones(currentZones),
-        regionChange: (previousZones?.regionId || null) !== (currentZones?.regionId || null),
-        nodeChange: (previousZones?.nodeId || null) !== (currentZones?.nodeId || null),
-        cityChange: (previousZones?.cityId || null) !== (currentZones?.cityId || null)
-      }
-    };
+  ): void {
+    logger.info('🔍 DIAGNOSTIC MODE', { playerUuid });
+    
+    const changes = this.detectDetailedChanges(previousZones, currentZones);
+    
+    logger.info('🔍 DIAGNOSTIC RESULT', {
+      playerUuid,
+      previous: this.formatZones(previousZones),
+      current: this.formatZones(currentZones),
+      changes,
+      shouldHaveTransition: changes.region.hasChange || changes.node.hasChange || changes.city.hasChange,
+      recommendation: changes.region.hasChange || changes.node.hasChange || changes.city.hasChange 
+        ? 'SHOULD generate transition events'
+        : 'Should NOT generate transition events'
+    });
   }
 }
