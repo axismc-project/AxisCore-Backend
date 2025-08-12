@@ -15,8 +15,8 @@ export interface ZoneTransition {
 export class ZoneTransitionDetector {
   
   /**
-   * Détecte les transitions de zones entre deux états
-   * Retourne null s'il n'y a pas de transition significative
+   * 🎯 MÉTHODE PRINCIPALE : Détecte UNIQUEMENT les vraies transitions de zones
+   * Retourne null si aucune transition significative (évite le spam wilderness)
    */
   detectTransitions(
     playerUuid: string,
@@ -24,52 +24,85 @@ export class ZoneTransitionDetector {
     currentZones: ChunkZoneData | null
   ): ZoneTransition | null {
     
+    // 🔍 Log de debug pour traçabilité
+    logger.debug('🔍 TRANSITION ANALYSIS', {
+      playerUuid,
+      previous: this.formatZones(previousZones),
+      current: this.formatZones(currentZones)
+    });
+
+    // ❌ CAS 1: Wilderness → Wilderness (FILTRÉ)
+    if (this.isWilderness(previousZones) && this.isWilderness(currentZones)) {
+      logger.debug('🚫 FILTERED: Wilderness → Wilderness', { playerUuid });
+      return null;
+    }
+
+    // ❌ CAS 2: Zones identiques (FILTRÉ)
+    if (this.areZonesIdentical(previousZones, currentZones)) {
+      logger.debug('🚫 FILTERED: Same zones', { 
+        playerUuid, 
+        zones: this.formatZones(currentZones) 
+      });
+      return null;
+    }
+
+    // ✅ CAS 3: Analyser les transitions réelles
     const transitions: ZoneTransition['transitions'] = {};
     let hasTransition = false;
 
-    // 🔍 RÉGION : Détecter enter/leave
-    const regionTransition = this.detectZoneTransition(
+    // Analyser chaque type de zone
+    const regionTransition = this.detectSingleZoneTransition(
+      'region',
       previousZones?.regionId || null,
       currentZones?.regionId || null,
       currentZones?.regionName || null
     );
+
+    const nodeTransition = this.detectSingleZoneTransition(
+      'node',
+      previousZones?.nodeId || null,
+      currentZones?.nodeId || null,
+      currentZones?.nodeName || null
+    );
+
+    const cityTransition = this.detectSingleZoneTransition(
+      'city',
+      previousZones?.cityId || null,
+      currentZones?.cityId || null,
+      currentZones?.cityName || null
+    );
+
+    // Collecter les transitions détectées
     if (regionTransition) {
       transitions.region = regionTransition;
       hasTransition = true;
     }
 
-    // 🔍 NODE : Détecter enter/leave  
-    const nodeTransition = this.detectZoneTransition(
-      previousZones?.nodeId || null,
-      currentZones?.nodeId || null,
-      currentZones?.nodeName || null
-    );
     if (nodeTransition) {
       transitions.node = nodeTransition;
       hasTransition = true;
     }
 
-    // 🔍 VILLE : Détecter enter/leave
-    const cityTransition = this.detectZoneTransition(
-      previousZones?.cityId || null,
-      currentZones?.cityId || null,
-      currentZones?.cityName || null
-    );
     if (cityTransition) {
       transitions.city = cityTransition;
       hasTransition = true;
     }
 
-    // ✅ Retourner SEULEMENT si il y a une vraie transition
+    // ❌ Aucune transition réelle trouvée
     if (!hasTransition) {
+      logger.debug('🚫 FILTERED: No real transitions detected', { playerUuid });
       return null;
     }
 
-    logger.info('🎯 Zone transition detected', {
+    // ✅ Transitions confirmées
+    logger.info('✅ ZONE TRANSITIONS DETECTED', {
       playerUuid,
-      previousZones: this.zonesToString(previousZones),
-      currentZones: this.zonesToString(currentZones),
-      transitions
+      transitionsCount: Object.keys(transitions).length,
+      from: this.formatZones(previousZones),
+      to: this.formatZones(currentZones),
+      transitions: Object.entries(transitions).map(([type, data]) => 
+        `${type}: ${data.type} ${data.zoneName}`
+      )
     });
 
     return {
@@ -81,147 +114,106 @@ export class ZoneTransitionDetector {
   }
 
   /**
-   * Détecte la transition pour un type de zone spécifique
+   * 🔍 Détecte la transition pour UN type de zone spécifique
    */
-  private detectZoneTransition(
+  private detectSingleZoneTransition(
+    zoneType: 'region' | 'node' | 'city',
     previousZoneId: number | null,
     currentZoneId: number | null,
     currentZoneName: string | null
   ): { type: 'enter' | 'leave'; zoneId: number; zoneName: string } | null {
     
-    // Cas 1: Wilderness → Zone (ENTER)
+    // Wilderness → Zone (ENTER)
     if (previousZoneId === null && currentZoneId !== null) {
+      logger.debug(`📍 ${zoneType.toUpperCase()} ENTER`, {
+        zoneId: currentZoneId,
+        zoneName: currentZoneName
+      });
       return {
         type: 'enter',
         zoneId: currentZoneId,
-        zoneName: currentZoneName || `Zone ${currentZoneId}`
+        zoneName: currentZoneName || `${this.capitalize(zoneType)} ${currentZoneId}`
       };
     }
 
-    // Cas 2: Zone → Wilderness (LEAVE)
+    // Zone → Wilderness (LEAVE)
     if (previousZoneId !== null && currentZoneId === null) {
+      logger.debug(`📍 ${zoneType.toUpperCase()} LEAVE`, {
+        zoneId: previousZoneId
+      });
       return {
         type: 'leave',
         zoneId: previousZoneId,
-        zoneName: `Zone ${previousZoneId}` // On n'a plus le nom, approximation
+        zoneName: `${this.capitalize(zoneType)} ${previousZoneId}`
       };
     }
 
-    // Cas 3: Zone A → Zone B différente (LEAVE de A + ENTER de B sera géré séparément)
+    // Zone A → Zone B (ENTER dans la nouvelle)
     if (previousZoneId !== null && currentZoneId !== null && previousZoneId !== currentZoneId) {
-      // Cette méthode ne gère qu'une transition à la fois
-      // Le caller appellera cette méthode deux fois pour gérer LEAVE puis ENTER
+      logger.debug(`📍 ${zoneType.toUpperCase()} CHANGE`, {
+        from: previousZoneId,
+        to: currentZoneId
+      });
       return {
         type: 'enter',
         zoneId: currentZoneId,
-        zoneName: currentZoneName || `Zone ${currentZoneId}`
+        zoneName: currentZoneName || `${this.capitalize(zoneType)} ${currentZoneId}`
       };
     }
 
-    // Cas 4: Même zone ou wilderness → wilderness (PAS de transition)
+    // Aucune transition
     return null;
   }
 
+  // ========== MÉTHODES UTILITAIRES ==========
+
   /**
-   * Gère les transitions complexes Zone A → Zone B
+   * Vérifie si une position est dans le wilderness
    */
-  detectComplexTransitions(
-    playerUuid: string,
-    previousZones: ChunkZoneData | null,
-    currentZones: ChunkZoneData | null
-  ): ZoneTransition[] {
-    
-    const transitions: ZoneTransition[] = [];
-
-    // Pour chaque type de zone, gérer les transitions complexes
-    const zoneTypes: Array<{
-      type: 'region' | 'node' | 'city';
-      prevId: number | null;
-      currId: number | null;
-      currName: string | null;
-    }> = [
-      {
-        type: 'region',
-        prevId: previousZones?.regionId || null,
-        currId: currentZones?.regionId || null,
-        currName: currentZones?.regionName || null
-      },
-      {
-        type: 'node', 
-        prevId: previousZones?.nodeId || null,
-        currId: currentZones?.nodeId || null,
-        currName: currentZones?.nodeName || null
-      },
-      {
-        type: 'city',
-        prevId: previousZones?.cityId || null,
-        currId: currentZones?.cityId || null,
-        currName: currentZones?.cityName || null
-      }
-    ];
-
-    zoneTypes.forEach(({ type, prevId, currId, currName }) => {
-      // Zone A → Zone B (différentes)
-      if (prevId !== null && currId !== null && prevId !== currId) {
-        
-        // LEAVE de la zone précédente
-        const leaveTransition: ZoneTransition = {
-          playerUuid,
-          previousZones,
-          currentZones,
-          transitions: {
-            [type]: {
-              type: 'leave',
-              zoneId: prevId,
-              zoneName: `Zone ${prevId}`
-            }
-          }
-        };
-        transitions.push(leaveTransition);
-
-        // ENTER dans la nouvelle zone
-        const enterTransition: ZoneTransition = {
-          playerUuid,
-          previousZones,
-          currentZones,
-          transitions: {
-            [type]: {
-              type: 'enter',
-              zoneId: currId,
-              zoneName: currName || `Zone ${currId}`
-            }
-          }
-        };
-        transitions.push(enterTransition);
-      }
-    });
-
-    return transitions;
+  private isWilderness(zones: ChunkZoneData | null): boolean {
+    if (!zones) return true;
+    return !zones.regionId && !zones.nodeId && !zones.cityId;
   }
 
   /**
-   * Conversion zones en string pour logging
+   * Vérifie si deux ensembles de zones sont identiques
    */
-  private zonesToString(zones: ChunkZoneData | null): string {
-    if (!zones) return 'wilderness';
-    
-    const parts: string[] = [];
-    if (zones.regionId) parts.push(`R${zones.regionId}`);
-    if (zones.nodeId) parts.push(`N${zones.nodeId}`);
-    if (zones.cityId) parts.push(`C${zones.cityId}`);
-    
-    return parts.length > 0 ? parts.join(' → ') : 'wilderness';
-  }
-
-  /**
-   * Vérifie si deux zones sont identiques
-   */
-  private areZonesEqual(zones1: ChunkZoneData | null, zones2: ChunkZoneData | null): boolean {
+  private areZonesIdentical(zones1: ChunkZoneData | null, zones2: ChunkZoneData | null): boolean {
     if (!zones1 && !zones2) return true;
     if (!zones1 || !zones2) return false;
     
     return zones1.regionId === zones2.regionId &&
            zones1.nodeId === zones2.nodeId &&
            zones1.cityId === zones2.cityId;
+  }
+
+  /**
+   * Formate les zones pour l'affichage
+   */
+  private formatZones(zones: ChunkZoneData | null): string {
+    if (!zones || this.isWilderness(zones)) {
+      return 'wilderness';
+    }
+    
+    const parts: string[] = [];
+    if (zones.regionId) parts.push(`R${zones.regionId}`);
+    if (zones.nodeId) parts.push(`N${zones.nodeId}`);
+    if (zones.cityId) parts.push(`C${zones.cityId}`);
+    
+    return parts.length > 0 ? parts.join('→') : 'wilderness';
+  }
+
+  /**
+   * Met en majuscule la première lettre
+   */
+  private capitalize(str: string): string {
+    return str.charAt(0).toUpperCase() + str.slice(1);
+  }
+
+  /**
+   * Méthode publique pour formater les zones (utilisée par ZoneSyncService)
+   */
+  zonesToString(zones: ChunkZoneData | null): string {
+    return this.formatZones(zones);
   }
 }
