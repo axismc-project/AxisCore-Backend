@@ -287,28 +287,28 @@ constructor(
   }
 
   // ========== SUBSCRIPTION AUX TRANSITIONS REDIS ==========
-  private async subscribeToRedisTransitions(): Promise<void> {
-    try {
-      logger.info('🔧 Setting up Redis zone transition subscriptions...');
-      
-      // ✅ S'abonner SEULEMENT aux événements de transition
-      await this.redis.subscribeToZoneEvents((channel: string, message: string) => {
-        logger.debug('📡 Redis transition event received', { 
-          channel, 
-          messagePreview: message.substring(0, 100),
-          clientsCount: this.authenticatedClients.size
-        });
-        
-        this.handleZoneTransitionEvent(channel, message);
+private async subscribeToRedisTransitions(): Promise<void> {
+  try {
+    logger.info('🔧 Setting up Redis zone transition subscriptions...');
+    
+    // ✅ S'abonner au bon channel
+    await this.redis.subscribeToZoneEvents((channel: string, message: string) => {
+      logger.info('📡 Redis transition event received', { 
+        channel, 
+        messagePreview: message.substring(0, 100),
+        clientsCount: this.authenticatedClients.size
       });
       
-      logger.info('✅ Redis zone transition subscriptions active');
-    } catch (error) {
-      logger.error('❌ Failed to subscribe to Redis transitions:', { 
-        error: error instanceof Error ? error.message : 'Unknown error' 
-      });
-    }
+      this.handleZoneTransitionEvent(channel, message);
+    });
+    
+    logger.info('✅ Redis zone transition subscriptions active');
+  } catch (error) {
+    logger.error('❌ Failed to subscribe to Redis transitions:', { 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
   }
+}
 
   // ========== TRAITEMENT DES ÉVÉNEMENTS DE TRANSITION ==========
   private handleZoneTransitionEvent(channel: string, message: string): void {

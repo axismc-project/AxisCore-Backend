@@ -730,36 +730,112 @@ private async handlePlayerPositionChange(uuid: string, operation: string): Promi
   /**
    * Publie les événements de transition via Redis
    */
-  private async publishTransitionEvents(transition: any): Promise<void> {
-    try {
-      const { transitions, playerUuid } = transition;
+/**
+ * Publie les événements de transition via Redis (VERSION DEBUGGÉE)
+ */
+private async publishTransitionEvents(transition: any): Promise<void> {
+  try {
+    logger.info('📤 PUBLISHING TRANSITION EVENTS - START', {
+      playerUuid: transition.playerUuid,
+      transitionsToPublish: Object.keys(transition.transitions),
+      fullTransition: transition
+    });
 
-      for (const [zoneType, transitionData] of Object.entries(transitions)) {
-        if (transitionData && typeof transitionData === 'object') {
-          const event = {
-            playerUuid,
-            zoneType: zoneType as 'region' | 'node' | 'city',
-            zoneId: (transitionData as any).zoneId,
-            zoneName: (transitionData as any).zoneName,
-            eventType: (transitionData as any).type as 'enter' | 'leave',
-            timestamp: Date.now()
-          };
+    const { transitions, playerUuid } = transition;
 
-          await this.redisService.publishZoneEvent(event);
-          
-          logger.debug('📤 Event published', {
+    if (!transitions || Object.keys(transitions).length === 0) {
+      logger.warn('⚠️ NO TRANSITIONS TO PUBLISH', {
+        playerUuid,
+        transitions,
+        reason: 'transitions object is empty or null'
+      });
+      return;
+    }
+
+    let publishedCount = 0;
+    let errorCount = 0;
+
+    for (const [zoneType, transitionData] of Object.entries(transitions)) {
+      try {
+        if (!transitionData || typeof transitionData !== 'object') {
+          logger.warn('⚠️ INVALID TRANSITION DATA', {
             playerUuid,
-            event: `${zoneType}_${event.eventType}`,
-            zoneName: event.zoneName
+            zoneType,
+            transitionData,
+            reason: 'transitionData is null or not an object'
           });
+          errorCount++;
+          continue;
         }
+
+        const event = {
+          playerUuid,
+          zoneType: zoneType as 'region' | 'node' | 'city',
+          zoneId: (transitionData as any).zoneId,
+          zoneName: (transitionData as any).zoneName,
+          eventType: (transitionData as any).type as 'enter' | 'leave',
+          timestamp: Date.now()
+        };
+
+        logger.info('📤 PUBLISHING SINGLE EVENT', {
+          playerUuid,
+          event,
+          zoneType,
+          aboutToPublish: true
+        });
+
+        // ✅ PUBLIER L'ÉVÉNEMENT
+        await this.redisService.publishZoneEvent(event);
+        publishedCount++;
+        
+        logger.info('✅ EVENT PUBLISHED SUCCESSFULLY', {
+          playerUuid,
+          event: `${zoneType}_${event.eventType}`,
+          zoneName: event.zoneName,
+          zoneId: event.zoneId,
+          publishedCount
+        });
+
+      } catch (eventError) {
+        errorCount++;
+        logger.error('❌ FAILED TO PUBLISH SINGLE EVENT', {
+          playerUuid,
+          zoneType,
+          transitionData,
+          error: eventError instanceof Error ? eventError.message : 'Unknown error',
+          stack: eventError instanceof Error ? eventError.stack : undefined
+        });
       }
-    } catch (error) {
-      logger.error('❌ Failed to publish transition events', {
-        error: error instanceof Error ? error.message : 'Unknown error'
+    }
+
+    // 📊 RÉSUMÉ FINAL
+    logger.info('📤 PUBLISHING COMPLETE', {
+      playerUuid,
+      publishedCount,
+      errorCount,
+      totalAttempted: Object.keys(transitions).length,
+      success: errorCount === 0
+    });
+
+    if (errorCount > 0) {
+      logger.error('❌ SOME EVENTS FAILED TO PUBLISH', {
+        playerUuid,
+        publishedCount,
+        errorCount,
+        warning: 'Some WebSocket clients may not receive events'
       });
     }
+
+  } catch (error) {
+    logger.error('❌ CRITICAL: Failed to publish transition events', {
+      playerUuid: transition?.playerUuid || 'unknown',
+      error: error instanceof Error ? error.message : 'Unknown error',
+      stack: error instanceof Error ? error.stack : undefined,
+      transition
+    });
+    throw error; // Re-throw to see if this causes issues upstream
   }
+}
 
   /**
    * Synchronise vers la base de données silencieusement

@@ -591,45 +591,89 @@ async subscribeToKeyspaceEvents(callback: (uuid: string, operation: string) => v
   }
 
   // ========== PUB/SUB ÉVÉNEMENTS ==========
-  async publishZoneEvent(event: ZoneEvent): Promise<void> {
-    const channel = `zone.${event.zoneType}.${event.eventType}`;
-    const publisher = this.getPublisher();
-    
-    try {
-      await publisher.publish(channel, JSON.stringify(event));
-      await this.addEventToStream(event);
-    } catch (error) {
-      logger.error('Failed to publish zone event', { 
-        event, 
-        error: error instanceof Error ? error.message : 'Unknown error' 
-      });
-      throw new Error('Unable to publish zone event');
-    }
-  }
+/**
+ * Publie un événement de zone vers le channel Redis
+ */
+/**
+ * Publie un événement de zone vers le channel Redis (CORRIGÉ)
+ */
+async publishZoneEvent(event: {
+  playerUuid: string;
+  zoneType: 'region' | 'node' | 'city';
+  zoneId: number;
+  zoneName: string;
+  eventType: 'enter' | 'leave';
+  timestamp: number;
+}): Promise<void> {
+  try {
+    // ✅ CORRECTION: Utiliser le bon format de channel
+    const channel = 'zone_transitions';
+    const message = JSON.stringify(event);
 
- async subscribeToZoneEvents(callback: (channel: string, message: string) => void): Promise<void> {
+    logger.info('📡 REDIS PUBLISH - Zone event', {
+      channel,
+      event,
+      messageSize: message.length
+    });
+
+    const result = await this.publish(channel, message);
+    
+    logger.info('✅ REDIS PUBLISH SUCCESS', {
+      channel,
+      playerUuid: event.playerUuid,
+      eventType: `${event.zoneType}_${event.eventType}`,
+      subscribersNotified: result,
+      messageSize: message.length
+    });
+
+  } catch (error) {
+    logger.error('❌ REDIS PUBLISH FAILED', {
+      event,
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+    throw error;
+  }
+}
+
+/**
+ * Méthode générique publish (CORRIGÉE pour éviter l'erreur null)
+ */
+async publish(channel: string, message: string): Promise<number> {
+  try {
+    const client = this.getClient(); // ✅ CORRECTION: Utiliser getClient()
+    const result = await client.publish(channel, message);
+    logger.debug('📡 Redis publish', { channel, messageLength: message.length, subscribers: result });
+    return result;
+  } catch (error) {
+    logger.error('Failed to publish to Redis', { 
+      channel, 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
+    throw error;
+  }
+}
+
+/**
+ * S'abonne aux événements de zone (CORRIGÉ)
+ */
+async subscribeToZoneEvents(callback: (channel: string, message: string) => void): Promise<void> {
   const subscriber = this.getSubscriber();
   
-  const channels = [
-    'zone.region.enter', 'zone.region.leave',
-    'zone.node.enter', 'zone.node.leave',
-    'zone.city.enter', 'zone.city.leave'
-  ];
+  // ✅ CORRECTION: S'abonner au bon channel
+  const channel = 'zone_transitions';
 
   try {
-    for (const channel of channels) {
-      // ✅ FIX: S'assurer que l'ordre des paramètres est correct
-      await subscriber.subscribe(channel, (message, receivedChannel) => {
-        logger.debug('📡 REDIS CALLBACK', { 
-          receivedChannel, 
-          messagePreview: message.substring(0, 100) 
-        });
-        callback(receivedChannel, message);
+    await subscriber.subscribe(channel, (message, receivedChannel) => {
+      logger.debug('📡 REDIS ZONE EVENT RECEIVED', { 
+        receivedChannel, 
+        messagePreview: message.substring(0, 100) 
       });
-    }
-    logger.info('Subscribed to zone events', { channelCount: channels.length });
+      callback(receivedChannel, message);
+    });
+    
+    logger.info('✅ Subscribed to zone transitions', { channel });
   } catch (error) {
-    logger.error('Failed to subscribe to zone events', { 
+    logger.error('❌ Failed to subscribe to zone events', { 
       error: error instanceof Error ? error.message : 'Unknown error' 
     });
     throw new Error('Unable to subscribe to zone events');
