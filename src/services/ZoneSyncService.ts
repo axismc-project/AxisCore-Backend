@@ -484,92 +484,161 @@ export class ZoneSyncService {
 
   // ========== 🎯 MÉTHODE PRINCIPALE OPTIMISÉE ==========
 
-  private async handlePlayerPositionChange(uuid: string, operation: string): Promise<void> {
-    if (!this.calculatorService || !this.serviceReady) {
-      logger.debug('Service not ready for position processing', { uuid, operation });
+private async handlePlayerPositionChange(uuid: string, operation: string): Promise<void> {
+  if (!this.calculatorService || !this.serviceReady) {
+    logger.info('⚠️ SERVICE NOT READY', { 
+      uuid, 
+      operation,
+      calculatorService: !!this.calculatorService,
+      serviceReady: this.serviceReady
+    });
+    return;
+  }
+
+  try {
+    logger.info('🔄 POSITION CHANGE START', { 
+      uuid, 
+      operation,
+      timestamp: Date.now()
+    });
+
+    // 1. Récupérer les données actuelles
+    const [previousZones, chunkData] = await Promise.all([
+      this.redisService.getPlayerZones(uuid),
+      this.redisService.getPlayerChunk(uuid)
+    ]);
+
+    logger.info('📊 DATA RETRIEVED', {
+      uuid,
+      previousZones: previousZones ? {
+        regionId: previousZones.region_id,
+        nodeId: previousZones.node_id,
+        cityId: previousZones.city_id,
+        lastUpdate: new Date(previousZones.last_update).toISOString()
+      } : null,
+      chunkData: chunkData ? {
+        chunkX: chunkData.chunk_x,
+        chunkZ: chunkData.chunk_z,
+        timestamp: new Date(chunkData.timestamp).toISOString()
+      } : null
+    });
+
+    if (!chunkData) {
+      logger.info('❌ NO CHUNK DATA - Player disconnected?', { uuid });
       return;
     }
 
-    try {
-      // 1. Récupérer les données actuelles
-      const [previousZones, chunkData] = await Promise.all([
-        this.redisService.getPlayerZones(uuid),
-        this.redisService.getPlayerChunk(uuid)
-      ]);
+    // 2. Calculer les zones actuelles
+    const currentZoneData = this.calculatorService.calculateChunkZones(
+      chunkData.chunk_x, chunkData.chunk_z, 
+      this.regions, this.nodes, this.cities
+    );
 
-      if (!chunkData) {
-        logger.debug('No chunk data found - player may have disconnected', { uuid });
-        return;
+    logger.info('🧮 ZONES CALCULATED', {
+      uuid,
+      chunk: `${chunkData.chunk_x},${chunkData.chunk_z}`,
+      calculatedZones: {
+        regionId: currentZoneData.regionId,
+        regionName: currentZoneData.regionName,
+        nodeId: currentZoneData.nodeId,
+        nodeName: currentZoneData.nodeName,
+        cityId: currentZoneData.cityId,
+        cityName: currentZoneData.cityName
+      },
+      isWilderness: !currentZoneData.regionId && !currentZoneData.nodeId && !currentZoneData.cityId
+    });
+
+    // 3. Vérifier la cohérence du cache
+    const cacheCoherent = this.isCacheCoherent(previousZones, currentZoneData);
+    
+    logger.info('🔍 CACHE COHERENCE CHECK', {
+      uuid,
+      cacheCoherent,
+      comparison: {
+        region: `${previousZones?.region_id || 'null'} === ${currentZoneData.regionId || 'null'}`,
+        node: `${previousZones?.node_id || 'null'} === ${currentZoneData.nodeId || 'null'}`,
+        city: `${previousZones?.city_id || 'null'} === ${currentZoneData.cityId || 'null'}`
       }
+    });
 
-      // 2. Calculer les zones actuelles
-      const currentZoneData = this.calculatorService.calculateChunkZones(
-        chunkData.chunk_x, chunkData.chunk_z, 
-        this.regions, this.nodes, this.cities
-      );
-
-      // 3. Vérifier la cohérence du cache
-      const cacheCoherent = this.isCacheCoherent(previousZones, currentZoneData);
-      
-      if (!cacheCoherent) {
-        logger.info('🧹 CACHE CORRECTION: Fixing inconsistent cache', {
-          uuid,
-          chunk: `${chunkData.chunk_x},${chunkData.chunk_z}`,
-          cached: this.formatCachedZones(previousZones),
-          reality: this.transitionDetector.zonesToString(currentZoneData)
-        });
-
-        // Corriger le cache SANS générer d'événements
-        await this.correctPlayerCache(uuid, currentZoneData);
-        this.stats.cacheCorrections++;
-        return;
-      }
-
-      // 4. Détection de transitions
-      const previousZoneData: ChunkZoneData | null = previousZones ? {
-        regionId: previousZones.region_id || null,
-        regionName: null,
-        nodeId: previousZones.node_id || null,
-        nodeName: null,
-        cityId: previousZones.city_id || null,
-        cityName: null
-      } : null;
-
-      const transition = this.transitionDetector.detectTransitions(
+    if (!cacheCoherent) {
+      logger.info('🧹 CACHE CORRECTION NEEDED', {
         uuid,
-        previousZoneData,
-        currentZoneData
-      );
-
-      // 5. Pas de transition → mise à jour silencieuse
-      if (!transition) {
-        await this.updatePlayerCacheSilently(uuid, currentZoneData);
-        await this.syncPlayerToDatabaseSilently(uuid, chunkData, currentZoneData);
-        return;
-      }
-
-      // 6. Transition détectée → publier les événements
-      logger.info('🎯 ZONE TRANSITION: Broadcasting to WebSocket', {
-        uuid,
-        transitionsCount: Object.keys(transition.transitions).length,
-        from: this.transitionDetector.zonesToString(transition.previousZones),
-        to: this.transitionDetector.zonesToString(transition.currentZones)
+        chunk: `${chunkData.chunk_x},${chunkData.chunk_z}`,
+        cached: this.formatCachedZones(previousZones),
+        reality: this.transitionDetector.zonesToString(currentZoneData),
+        action: 'Correcting cache without events'
       });
 
-      await this.updatePlayerCache(uuid, currentZoneData);
-      await this.publishTransitionEvents(transition);
-      await this.syncPlayerToDatabase(uuid, chunkData, currentZoneData);
-
-      this.stats.transitionsDetected++;
-
-    } catch (error) {
-      logger.error('❌ Failed to handle player position change', { 
-        uuid, 
-        operation,
-        error: error instanceof Error ? error.message : 'Unknown error'
-      });
+      await this.correctPlayerCache(uuid, currentZoneData);
+      this.stats.cacheCorrections++;
+      return;
     }
+
+    // 4. Détection de transitions
+    const previousZoneData: ChunkZoneData | null = previousZones ? {
+      regionId: previousZones.region_id || null,
+      regionName: null,
+      nodeId: previousZones.node_id || null,
+      nodeName: null,
+      cityId: previousZones.city_id || null,
+      cityName: null
+    } : null;
+
+    logger.info('🎯 CALLING TRANSITION DETECTOR', {
+      uuid,
+      previousZoneData,
+      currentZoneData,
+      aboutToCallDetector: true
+    });
+
+    const transition = this.transitionDetector.detectTransitions(
+      uuid,
+      previousZoneData,
+      currentZoneData
+    );
+
+    logger.info('📋 TRANSITION DETECTOR RESULT', {
+      uuid,
+      hasTransition: !!transition,
+      transition: transition ? {
+        transitionsCount: Object.keys(transition.transitions).length,
+        transitions: transition.transitions
+      } : null
+    });
+
+    // 5. Pas de transition → mise à jour silencieuse
+    if (!transition) {
+      logger.info('🔄 SILENT UPDATE - No transitions', { uuid });
+      await this.updatePlayerCacheSilently(uuid, currentZoneData);
+      await this.syncPlayerToDatabaseSilently(uuid, chunkData, currentZoneData);
+      return;
+    }
+
+    // 6. Transition détectée → publier les événements
+    logger.info('🎉 TRANSITION DETECTED - BROADCASTING', {
+      uuid,
+      transitionsCount: Object.keys(transition.transitions).length,
+      from: this.transitionDetector.zonesToString(transition.previousZones),
+      to: this.transitionDetector.zonesToString(transition.currentZones),
+      willBroadcast: true
+    });
+
+    await this.updatePlayerCache(uuid, currentZoneData);
+    await this.publishTransitionEvents(transition);
+    await this.syncPlayerToDatabase(uuid, chunkData, currentZoneData);
+
+    this.stats.transitionsDetected++;
+
+  } catch (error) {
+    logger.error('❌ POSITION CHANGE ERROR', { 
+      uuid, 
+      operation,
+      error: error instanceof Error ? error.message : 'Unknown error',
+      stack: error instanceof Error ? error.stack : undefined
+    });
   }
+}
 
   // ========== MÉTHODES UTILITAIRES ==========
 
