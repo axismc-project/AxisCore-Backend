@@ -15,6 +15,7 @@ interface ZoneSyncStats {
   errors: number;
   transitionsDetected: number;
   cacheCorrections: number;
+  nullUpdatesProcessed: number; // ✅ NOUVEAU: Compteur pour les mises à jour null
   performance: {
     lastSyncDuration: number;
     averageChunkTime: number;
@@ -59,6 +60,7 @@ export class ZoneSyncService {
     errors: 0,
     transitionsDetected: 0,
     cacheCorrections: 0,
+    nullUpdatesProcessed: 0, // ✅ NOUVEAU
     performance: {
       lastSyncDuration: 0,
       averageChunkTime: 0
@@ -72,7 +74,7 @@ export class ZoneSyncService {
     private batchService?: DatabaseBatchService
   ) {
     this.transitionDetector = new ZoneTransitionDetector();
-    logger.info('🚀 ZoneSyncService initialized with optimized transition detection');
+    logger.info('🚀 ZoneSyncService initialized with FIXED null handling');
   }
 
   // ========== INITIALIZATION ==========
@@ -84,7 +86,7 @@ export class ZoneSyncService {
     }
 
     try {
-      logger.info('🚀 Initializing ZoneSyncService with smart filtering');
+      logger.info('🚀 Initializing ZoneSyncService with CORRECTED zone handling');
       
       // 1. Perform initial zone synchronization
       await this.performFullSync();
@@ -100,15 +102,16 @@ export class ZoneSyncService {
       this.lastSyncTime = new Date();
       this.updateStats();
       
-      logger.info('✅ ZoneSyncService ready with smart transition detection', {
+      logger.info('✅ ZoneSyncService ready with FIXED null zone handling', {
         regions: this.regions.length,
         nodes: this.nodes.length,
         cities: this.cities.length,
         features: [
           'Smart transition detection',
-          'Cache corruption prevention',
+          'FIXED null zone handling',
           'Wilderness filtering',
-          'Enter/leave only events'
+          'Enter/leave only events',
+          'Proper database null updates'
         ]
       });
     } catch (error) {
@@ -482,168 +485,168 @@ export class ZoneSyncService {
     });
   }
 
-  // ========== 🎯 MÉTHODE PRINCIPALE OPTIMISÉE ==========
+  // ========== 🎯 MÉTHODE PRINCIPALE CORRIGÉE ==========
 
-private async handlePlayerPositionChange(uuid: string, operation: string): Promise<void> {
-  if (!this.calculatorService || !this.serviceReady) {
-    logger.info('⚠️ SERVICE NOT READY', { 
-      uuid, 
-      operation,
-      calculatorService: !!this.calculatorService,
-      serviceReady: this.serviceReady
-    });
-    return;
-  }
-
-  try {
-    logger.info('🔄 POSITION CHANGE START', { 
-      uuid, 
-      operation,
-      timestamp: Date.now()
-    });
-
-    // 1. Récupérer les données actuelles
-    const [previousZones, chunkData] = await Promise.all([
-      this.redisService.getPlayerZones(uuid),
-      this.redisService.getPlayerChunk(uuid)
-    ]);
-
-    logger.info('📊 DATA RETRIEVED', {
-      uuid,
-      previousZones: previousZones ? {
-        regionId: previousZones.region_id,
-        nodeId: previousZones.node_id,
-        cityId: previousZones.city_id,
-        lastUpdate: new Date(previousZones.last_update).toISOString()
-      } : null,
-      chunkData: chunkData ? {
-        chunkX: chunkData.chunk_x,
-        chunkZ: chunkData.chunk_z,
-        timestamp: new Date(chunkData.timestamp).toISOString()
-      } : null
-    });
-
-    if (!chunkData) {
-      logger.info('❌ NO CHUNK DATA - Player disconnected?', { uuid });
+  private async handlePlayerPositionChange(uuid: string, operation: string): Promise<void> {
+    if (!this.calculatorService || !this.serviceReady) {
+      logger.debug('⚠️ SERVICE NOT READY', { 
+        uuid, 
+        operation,
+        calculatorService: !!this.calculatorService,
+        serviceReady: this.serviceReady
+      });
       return;
     }
 
-    // 2. Calculer les zones actuelles
-    const currentZoneData = this.calculatorService.calculateChunkZones(
-      chunkData.chunk_x, chunkData.chunk_z, 
-      this.regions, this.nodes, this.cities
-    );
-
-    logger.info('🧮 ZONES CALCULATED', {
-      uuid,
-      chunk: `${chunkData.chunk_x},${chunkData.chunk_z}`,
-      calculatedZones: {
-        regionId: currentZoneData.regionId,
-        regionName: currentZoneData.regionName,
-        nodeId: currentZoneData.nodeId,
-        nodeName: currentZoneData.nodeName,
-        cityId: currentZoneData.cityId,
-        cityName: currentZoneData.cityName
-      },
-      isWilderness: !currentZoneData.regionId && !currentZoneData.nodeId && !currentZoneData.cityId
-    });
-
-    // 3. Vérifier la cohérence du cache
-    const cacheCoherent = this.isCacheCoherent(previousZones, currentZoneData);
-    
-    logger.info('🔍 CACHE COHERENCE CHECK', {
-      uuid,
-      cacheCoherent,
-      comparison: {
-        region: `${previousZones?.region_id || 'null'} === ${currentZoneData.regionId || 'null'}`,
-        node: `${previousZones?.node_id || 'null'} === ${currentZoneData.nodeId || 'null'}`,
-        city: `${previousZones?.city_id || 'null'} === ${currentZoneData.cityId || 'null'}`
-      }
-    });
-
-    if (!cacheCoherent) {
-      logger.info('🧹 CACHE CORRECTION NEEDED', {
-        uuid,
-        chunk: `${chunkData.chunk_x},${chunkData.chunk_z}`,
-        cached: this.formatCachedZones(previousZones),
-        reality: this.transitionDetector.zonesToString(currentZoneData),
-        action: 'Correcting cache without events'
+    try {
+      logger.debug('🔄 POSITION CHANGE START', { 
+        uuid, 
+        operation,
+        timestamp: Date.now()
       });
 
-      await this.correctPlayerCache(uuid, currentZoneData);
-      this.stats.cacheCorrections++;
-      return;
-    }
+      // 1. Récupérer les données actuelles
+      const [previousZones, chunkData] = await Promise.all([
+        this.redisService.getPlayerZones(uuid),
+        this.redisService.getPlayerChunk(uuid)
+      ]);
 
-    // 4. Détection de transitions
-    const previousZoneData: ChunkZoneData | null = previousZones ? {
-      regionId: previousZones.region_id || null,
-      regionName: null,
-      nodeId: previousZones.node_id || null,
-      nodeName: null,
-      cityId: previousZones.city_id || null,
-      cityName: null
-    } : null;
+      logger.debug('📊 DATA RETRIEVED', {
+        uuid,
+        previousZones: previousZones ? {
+          regionId: previousZones.region_id,
+          nodeId: previousZones.node_id,
+          cityId: previousZones.city_id,
+          lastUpdate: new Date(previousZones.last_update).toISOString()
+        } : null,
+        chunkData: chunkData ? {
+          chunkX: chunkData.chunk_x,
+          chunkZ: chunkData.chunk_z,
+          timestamp: new Date(chunkData.timestamp).toISOString()
+        } : null
+      });
 
-    logger.info('🎯 CALLING TRANSITION DETECTOR', {
-      uuid,
-      previousZoneData,
-      currentZoneData,
-      aboutToCallDetector: true
-    });
+      if (!chunkData) {
+        logger.debug('❌ NO CHUNK DATA - Player disconnected?', { uuid });
+        return;
+      }
 
-    const transition = this.transitionDetector.detectTransitions(
-      uuid,
-      previousZoneData,
-      currentZoneData
-    );
+      // 2. Calculer les zones actuelles
+      const currentZoneData = this.calculatorService.calculateChunkZones(
+        chunkData.chunk_x, chunkData.chunk_z, 
+        this.regions, this.nodes, this.cities
+      );
 
-    logger.info('📋 TRANSITION DETECTOR RESULT', {
-      uuid,
-      hasTransition: !!transition,
-      transition: transition ? {
+      logger.debug('🧮 ZONES CALCULATED', {
+        uuid,
+        chunk: `${chunkData.chunk_x},${chunkData.chunk_z}`,
+        calculatedZones: {
+          regionId: currentZoneData.regionId,
+          regionName: currentZoneData.regionName,
+          nodeId: currentZoneData.nodeId,
+          nodeName: currentZoneData.nodeName,
+          cityId: currentZoneData.cityId,
+          cityName: currentZoneData.cityName
+        },
+        isWilderness: !currentZoneData.regionId && !currentZoneData.nodeId && !currentZoneData.cityId
+      });
+
+      // 3. Vérifier la cohérence du cache
+      const cacheCoherent = this.isCacheCoherent(previousZones, currentZoneData);
+      
+      logger.debug('🔍 CACHE COHERENCE CHECK', {
+        uuid,
+        cacheCoherent,
+        comparison: {
+          region: `${previousZones?.region_id ?? 'null'} === ${currentZoneData.regionId ?? 'null'}`,
+          node: `${previousZones?.node_id ?? 'null'} === ${currentZoneData.nodeId ?? 'null'}`,
+          city: `${previousZones?.city_id ?? 'null'} === ${currentZoneData.cityId ?? 'null'}`
+        }
+      });
+
+      if (!cacheCoherent) {
+        logger.info('🧹 CACHE CORRECTION NEEDED', {
+          uuid,
+          chunk: `${chunkData.chunk_x},${chunkData.chunk_z}`,
+          cached: this.formatCachedZones(previousZones),
+          reality: this.transitionDetector.zonesToString(currentZoneData),
+          action: 'Correcting cache without events'
+        });
+
+        await this.correctPlayerCache(uuid, currentZoneData);
+        this.stats.cacheCorrections++;
+        return;
+      }
+
+      // 4. Détection de transitions
+      const previousZoneData: ChunkZoneData | null = previousZones ? {
+        regionId: previousZones.region_id ?? null,
+        regionName: null,
+        nodeId: previousZones.node_id ?? null,
+        nodeName: null,
+        cityId: previousZones.city_id ?? null,
+        cityName: null
+      } : null;
+
+      logger.debug('🎯 CALLING TRANSITION DETECTOR', {
+        uuid,
+        previousZoneData,
+        currentZoneData,
+        aboutToCallDetector: true
+      });
+
+      const transition = this.transitionDetector.detectTransitions(
+        uuid,
+        previousZoneData,
+        currentZoneData
+      );
+
+      logger.debug('📋 TRANSITION DETECTOR RESULT', {
+        uuid,
+        hasTransition: !!transition,
+        transition: transition ? {
+          transitionsCount: Object.keys(transition.transitions).length,
+          transitions: transition.transitions
+        } : null
+      });
+
+      // 5. Pas de transition → mise à jour silencieuse
+      if (!transition) {
+        logger.debug('🔄 SILENT UPDATE - No transitions', { uuid });
+        await this.updatePlayerCacheSilently(uuid, currentZoneData);
+        await this.syncPlayerToDatabaseSilently(uuid, chunkData, currentZoneData);
+        return;
+      }
+
+      // 6. Transition détectée → publier les événements
+      logger.info('🎉 TRANSITION DETECTED - BROADCASTING', {
+        uuid,
         transitionsCount: Object.keys(transition.transitions).length,
-        transitions: transition.transitions
-      } : null
-    });
+        from: this.transitionDetector.zonesToString(transition.previousZones),
+        to: this.transitionDetector.zonesToString(transition.currentZones),
+        willBroadcast: true
+      });
 
-    // 5. Pas de transition → mise à jour silencieuse
-    if (!transition) {
-      logger.info('🔄 SILENT UPDATE - No transitions', { uuid });
-      await this.updatePlayerCacheSilently(uuid, currentZoneData);
-      await this.syncPlayerToDatabaseSilently(uuid, chunkData, currentZoneData);
-      return;
+      await this.updatePlayerCache(uuid, currentZoneData);
+      await this.publishTransitionEvents(transition);
+      await this.syncPlayerToDatabase(uuid, chunkData, currentZoneData);
+
+      this.stats.transitionsDetected++;
+
+    } catch (error) {
+      logger.error('❌ POSITION CHANGE ERROR', { 
+        uuid, 
+        operation,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined
+      });
     }
-
-    // 6. Transition détectée → publier les événements
-    logger.info('🎉 TRANSITION DETECTED - BROADCASTING', {
-      uuid,
-      transitionsCount: Object.keys(transition.transitions).length,
-      from: this.transitionDetector.zonesToString(transition.previousZones),
-      to: this.transitionDetector.zonesToString(transition.currentZones),
-      willBroadcast: true
-    });
-
-    await this.updatePlayerCache(uuid, currentZoneData);
-    await this.publishTransitionEvents(transition);
-    await this.syncPlayerToDatabase(uuid, chunkData, currentZoneData);
-
-    this.stats.transitionsDetected++;
-
-  } catch (error) {
-    logger.error('❌ POSITION CHANGE ERROR', { 
-      uuid, 
-      operation,
-      error: error instanceof Error ? error.message : 'Unknown error',
-      stack: error instanceof Error ? error.stack : undefined
-    });
   }
-}
 
-  // ========== MÉTHODES UTILITAIRES ==========
+  // ========== MÉTHODES UTILITAIRES CORRIGÉES ==========
 
   /**
-   * Vérifie si le cache Redis est cohérent avec la réalité calculée
+   * ✅ CORRIGÉ: Vérifie si le cache Redis est cohérent avec la réalité calculée
    */
   private isCacheCoherent(cachedZones: any, realityZones: ChunkZoneData): boolean {
     if (!cachedZones) {
@@ -651,20 +654,22 @@ private async handlePlayerPositionChange(uuid: string, operation: string): Promi
       return !realityZones.regionId && !realityZones.nodeId && !realityZones.cityId;
     }
 
-    return (cachedZones.region_id || null) === (realityZones.regionId || null) &&
-           (cachedZones.node_id || null) === (realityZones.nodeId || null) &&
-           (cachedZones.city_id || null) === (realityZones.cityId || null);
+    // ✅ CORRECTION: Utiliser ?? null pour éviter les problèmes undefined
+    return (cachedZones.region_id ?? null) === (realityZones.regionId ?? null) &&
+           (cachedZones.node_id ?? null) === (realityZones.nodeId ?? null) &&
+           (cachedZones.city_id ?? null) === (realityZones.cityId ?? null);
   }
 
   /**
-   * Corrige le cache sans générer d'événements
+   * ✅ CORRIGÉ: Corrige le cache sans générer d'événements
    */
   private async correctPlayerCache(uuid: string, correctZoneData: ChunkZoneData): Promise<void> {
     try {
+      // ✅ CORRECTION: Utiliser ?? null au lieu de || undefined
       const zones = {
-        region_id: correctZoneData.regionId || undefined,
-        node_id: correctZoneData.nodeId || undefined,
-        city_id: correctZoneData.cityId || undefined,
+        region_id: correctZoneData.regionId ?? null,
+        node_id: correctZoneData.nodeId ?? null,
+        city_id: correctZoneData.cityId ?? null,
         last_update: Date.now()
       };
 
@@ -684,14 +689,15 @@ private async handlePlayerPositionChange(uuid: string, operation: string): Promi
   }
 
   /**
-   * Met à jour le cache silencieusement (sans événements)
+   * ✅ CORRIGÉ: Met à jour le cache silencieusement (sans événements)
    */
   private async updatePlayerCacheSilently(uuid: string, zoneData: ChunkZoneData): Promise<void> {
     try {
+      // ✅ CORRECTION: Utiliser ?? null au lieu de || undefined
       const zones = {
-        region_id: zoneData.regionId || undefined,
-        node_id: zoneData.nodeId || undefined,
-        city_id: zoneData.cityId || undefined,
+        region_id: zoneData.regionId ?? null,
+        node_id: zoneData.nodeId ?? null,
+        city_id: zoneData.cityId ?? null,
         last_update: Date.now()
       };
 
@@ -706,14 +712,15 @@ private async handlePlayerPositionChange(uuid: string, operation: string): Promi
   }
 
   /**
-   * Met à jour le cache (pour les vraies transitions)
+   * ✅ CORRIGÉ: Met à jour le cache (pour les vraies transitions)
    */
   private async updatePlayerCache(uuid: string, zoneData: ChunkZoneData): Promise<void> {
     try {
+      // ✅ CORRECTION: Utiliser ?? null au lieu de || undefined
       const zones = {
-        region_id: zoneData.regionId || undefined,
-        node_id: zoneData.nodeId || undefined,
-        city_id: zoneData.cityId || undefined,
+        region_id: zoneData.regionId ?? null,
+        node_id: zoneData.nodeId ?? null,
+        city_id: zoneData.cityId ?? null,
         last_update: Date.now()
       };
 
@@ -728,117 +735,114 @@ private async handlePlayerPositionChange(uuid: string, operation: string): Promi
   }
 
   /**
-   * Publie les événements de transition via Redis
+   * ✅ CORRIGÉ: Publie les événements de transition via Redis
    */
-/**
- * Publie les événements de transition via Redis (VERSION DEBUGGÉE)
- */
-private async publishTransitionEvents(transition: any): Promise<void> {
-  try {
-    logger.info('📤 PUBLISHING TRANSITION EVENTS - START', {
-      playerUuid: transition.playerUuid,
-      transitionsToPublish: Object.keys(transition.transitions),
-      fullTransition: transition
-    });
-
-    const { transitions, playerUuid } = transition;
-
-    if (!transitions || Object.keys(transitions).length === 0) {
-      logger.warn('⚠️ NO TRANSITIONS TO PUBLISH', {
-        playerUuid,
-        transitions,
-        reason: 'transitions object is empty or null'
+  private async publishTransitionEvents(transition: any): Promise<void> {
+    try {
+      logger.info('📤 PUBLISHING TRANSITION EVENTS - START', {
+        playerUuid: transition.playerUuid,
+        transitionsToPublish: Object.keys(transition.transitions),
+        fullTransition: transition
       });
-      return;
-    }
 
-    let publishedCount = 0;
-    let errorCount = 0;
+      const { transitions, playerUuid } = transition;
 
-    for (const [zoneType, transitionData] of Object.entries(transitions)) {
-      try {
-        if (!transitionData || typeof transitionData !== 'object') {
-          logger.warn('⚠️ INVALID TRANSITION DATA', {
+      if (!transitions || Object.keys(transitions).length === 0) {
+        logger.warn('⚠️ NO TRANSITIONS TO PUBLISH', {
+          playerUuid,
+          transitions,
+          reason: 'transitions object is empty or null'
+        });
+        return;
+      }
+
+      let publishedCount = 0;
+      let errorCount = 0;
+
+      for (const [zoneType, transitionData] of Object.entries(transitions)) {
+        try {
+          if (!transitionData || typeof transitionData !== 'object') {
+            logger.warn('⚠️ INVALID TRANSITION DATA', {
+              playerUuid,
+              zoneType,
+              transitionData,
+              reason: 'transitionData is null or not an object'
+            });
+            errorCount++;
+            continue;
+          }
+
+          const event = {
+            playerUuid,
+            zoneType: zoneType as 'region' | 'node' | 'city',
+            zoneId: (transitionData as any).zoneId,
+            zoneName: (transitionData as any).zoneName,
+            eventType: (transitionData as any).type as 'enter' | 'leave',
+            timestamp: Date.now()
+          };
+
+          logger.debug('📤 PUBLISHING SINGLE EVENT', {
+            playerUuid,
+            event,
+            zoneType,
+            aboutToPublish: true
+          });
+
+          // ✅ PUBLIER L'ÉVÉNEMENT
+          await this.redisService.publishZoneEvent(event);
+          publishedCount++;
+          
+          logger.debug('✅ EVENT PUBLISHED SUCCESSFULLY', {
+            playerUuid,
+            event: `${zoneType}_${event.eventType}`,
+            zoneName: event.zoneName,
+            zoneId: event.zoneId,
+            publishedCount
+          });
+
+        } catch (eventError) {
+          errorCount++;
+          logger.error('❌ FAILED TO PUBLISH SINGLE EVENT', {
             playerUuid,
             zoneType,
             transitionData,
-            reason: 'transitionData is null or not an object'
+            error: eventError instanceof Error ? eventError.message : 'Unknown error',
+            stack: eventError instanceof Error ? eventError.stack : undefined
           });
-          errorCount++;
-          continue;
         }
-
-        const event = {
-          playerUuid,
-          zoneType: zoneType as 'region' | 'node' | 'city',
-          zoneId: (transitionData as any).zoneId,
-          zoneName: (transitionData as any).zoneName,
-          eventType: (transitionData as any).type as 'enter' | 'leave',
-          timestamp: Date.now()
-        };
-
-        logger.info('📤 PUBLISHING SINGLE EVENT', {
-          playerUuid,
-          event,
-          zoneType,
-          aboutToPublish: true
-        });
-
-        // ✅ PUBLIER L'ÉVÉNEMENT
-        await this.redisService.publishZoneEvent(event);
-        publishedCount++;
-        
-        logger.info('✅ EVENT PUBLISHED SUCCESSFULLY', {
-          playerUuid,
-          event: `${zoneType}_${event.eventType}`,
-          zoneName: event.zoneName,
-          zoneId: event.zoneId,
-          publishedCount
-        });
-
-      } catch (eventError) {
-        errorCount++;
-        logger.error('❌ FAILED TO PUBLISH SINGLE EVENT', {
-          playerUuid,
-          zoneType,
-          transitionData,
-          error: eventError instanceof Error ? eventError.message : 'Unknown error',
-          stack: eventError instanceof Error ? eventError.stack : undefined
-        });
       }
-    }
 
-    // 📊 RÉSUMÉ FINAL
-    logger.info('📤 PUBLISHING COMPLETE', {
-      playerUuid,
-      publishedCount,
-      errorCount,
-      totalAttempted: Object.keys(transitions).length,
-      success: errorCount === 0
-    });
-
-    if (errorCount > 0) {
-      logger.error('❌ SOME EVENTS FAILED TO PUBLISH', {
+      // 📊 RÉSUMÉ FINAL
+      logger.info('📤 PUBLISHING COMPLETE', {
         playerUuid,
         publishedCount,
         errorCount,
-        warning: 'Some WebSocket clients may not receive events'
+        totalAttempted: Object.keys(transitions).length,
+        success: errorCount === 0
       });
-    }
 
-  } catch (error) {
-    logger.error('❌ CRITICAL: Failed to publish transition events', {
-      playerUuid: transition?.playerUuid || 'unknown',
-      error: error instanceof Error ? error.message : 'Unknown error',
-      stack: error instanceof Error ? error.stack : undefined,
-      transition
-    });
-    throw error; // Re-throw to see if this causes issues upstream
+      if (errorCount > 0) {
+        logger.error('❌ SOME EVENTS FAILED TO PUBLISH', {
+          playerUuid,
+          publishedCount,
+          errorCount,
+          warning: 'Some WebSocket clients may not receive events'
+        });
+      }
+
+    } catch (error) {
+      logger.error('❌ CRITICAL: Failed to publish transition events', {
+        playerUuid: transition?.playerUuid || 'unknown',
+        error: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined,
+        transition
+      });
+      throw error;
+    }
   }
-}
 
   /**
-   * Synchronise vers la base de données silencieusement
+   * ✅ CORRIGÉ: Synchronise vers la base de données silencieusement
    */
   private async syncPlayerToDatabaseSilently(uuid: string, chunkData: any, zoneData: ChunkZoneData): Promise<void> {
     if (!this.batchService) return;
@@ -847,7 +851,8 @@ private async publishTransitionEvents(transition: any): Promise<void> {
       const playerName = await this.getPlayerName(uuid);
       const positionData = await this.redisService.getPlayerPosition(uuid);
       
-      this.batchService.queuePlayerUpdate({
+      // ✅ CORRECTION CRITIQUE: Utiliser ?? null pour garantir les NULL en DB
+      const updateData = {
         uuid,
         name: playerName,
         x: positionData ? positionData.x : chunkData.chunk_x * 16,
@@ -855,183 +860,231 @@ private async publishTransitionEvents(transition: any): Promise<void> {
         z: positionData ? positionData.z : chunkData.chunk_z * 16,
         chunkX: chunkData.chunk_x,
         chunkZ: chunkData.chunk_z,
-        regionId: zoneData.regionId || undefined,
-        nodeId: zoneData.nodeId || undefined,
-        cityId: zoneData.cityId || undefined
-      });
-      
-    } catch (error) {
-      logger.error('Failed to sync player to database silently', {
-        uuid,
-        error: error instanceof Error ? error.message : 'Unknown error'
-      });
-    }
-  }
+        regionId: zoneData.regionId ?? null,  // ✅ FIX: null au lieu de undefined
+        nodeId: zoneData.nodeId ?? null,      // ✅ FIX: null au lieu de undefined
+cityId: zoneData.cityId ?? null       // ✅ FIX: null au lieu de undefined
+     };
 
-  /**
-   * Synchronise vers la base de données (pour les vraies transitions)
-   */
-  private async syncPlayerToDatabase(uuid: string, chunkData: any, zoneData: ChunkZoneData): Promise<void> {
-    if (!this.batchService) return;
+     // ✅ NOUVEAU: Log pour tracer les mises à jour null
+     const isWilderness = !zoneData.regionId && !zoneData.nodeId && !zoneData.cityId;
+     if (isWilderness) {
+       this.stats.nullUpdatesProcessed++;
+       logger.debug('🌿 WILDERNESS UPDATE - Setting zones to NULL', {
+         uuid,
+         chunk: `${chunkData.chunk_x},${chunkData.chunk_z}`,
+         updateData: {
+           regionId: updateData.regionId,
+           nodeId: updateData.nodeId,
+           cityId: updateData.cityId
+         },
+         nullUpdatesTotal: this.stats.nullUpdatesProcessed
+       });
+     }
 
-    try {
-      const playerName = await this.getPlayerName(uuid);
-      const positionData = await this.redisService.getPlayerPosition(uuid);
-      
-      this.batchService.queuePlayerUpdate({
-        uuid,
-        name: playerName,
-        x: positionData ? positionData.x : chunkData.chunk_x * 16,
-        y: positionData ? positionData.y : 64,
-        z: positionData ? positionData.z : chunkData.chunk_z * 16,
-        chunkX: chunkData.chunk_x,
-        chunkZ: chunkData.chunk_z,
-        regionId: zoneData.regionId || undefined,
-        nodeId: zoneData.nodeId || undefined,
-        cityId: zoneData.cityId || undefined
-      });
-      
-    } catch (error) {
-      logger.error('Failed to sync player to database', {
-        uuid,
-        error: error instanceof Error ? error.message : 'Unknown error'
-      });
-    }
-  }
+     this.batchService.queuePlayerUpdate(updateData);
+     
+   } catch (error) {
+     logger.error('Failed to sync player to database silently', {
+       uuid,
+       error: error instanceof Error ? error.message : 'Unknown error'
+     });
+   }
+ }
 
-  /**
-   * Récupère le nom du joueur
-   */
-  private async getPlayerName(uuid: string): Promise<string> {
-    try {
-      const player = await this.databaseService.getPlayerByUuid(uuid);
-      if (player?.player_name) {
-        return player.player_name;
-      }
-      return `Player_${uuid.substring(0, 8)}`;
-    } catch (error) {
-      return `Player_${uuid.substring(0, 8)}`;
-    }
-  }
+ /**
+  * ✅ CORRIGÉ: Synchronise vers la base de données (pour les vraies transitions)
+  */
+ private async syncPlayerToDatabase(uuid: string, chunkData: any, zoneData: ChunkZoneData): Promise<void> {
+   if (!this.batchService) return;
 
-  /**
-   * Formate les zones en cache pour les logs
-   */
-  private formatCachedZones(cachedZones: any): string {
-    if (!cachedZones) return 'none';
-    
-    const parts: string[] = [];
-    if (cachedZones.region_id) parts.push(`R${cachedZones.region_id}`);
-    if (cachedZones.node_id) parts.push(`N${cachedZones.node_id}`);
-    if (cachedZones.city_id) parts.push(`C${cachedZones.city_id}`);
-    
-    return parts.length > 0 ? parts.join('→') : 'wilderness';
-  }
+   try {
+     const playerName = await this.getPlayerName(uuid);
+     const positionData = await this.redisService.getPlayerPosition(uuid);
+     
+     // ✅ CORRECTION CRITIQUE: Utiliser ?? null pour garantir les NULL en DB
+     const updateData = {
+       uuid,
+       name: playerName,
+       x: positionData ? positionData.x : chunkData.chunk_x * 16,
+       y: positionData ? positionData.y : 64,
+       z: positionData ? positionData.z : chunkData.chunk_z * 16,
+       chunkX: chunkData.chunk_x,
+       chunkZ: chunkData.chunk_z,
+       regionId: zoneData.regionId ?? null,  // ✅ FIX: null au lieu de undefined
+       nodeId: zoneData.nodeId ?? null,      // ✅ FIX: null au lieu de undefined
+       cityId: zoneData.cityId ?? null       // ✅ FIX: null au lieu de undefined
+     };
 
-  // ========== PUBLIC API METHODS ==========
+     // ✅ NOUVEAU: Log pour tracer les mises à jour null lors des transitions
+     const isWilderness = !zoneData.regionId && !zoneData.nodeId && !zoneData.cityId;
+     if (isWilderness) {
+       this.stats.nullUpdatesProcessed++;
+       logger.info('🌿 TRANSITION TO WILDERNESS - Setting zones to NULL', {
+         uuid,
+         chunk: `${chunkData.chunk_x},${chunkData.chunk_z}`,
+         updateData: {
+           regionId: updateData.regionId,
+           nodeId: updateData.nodeId,
+           cityId: updateData.cityId
+         },
+         nullUpdatesTotal: this.stats.nullUpdatesProcessed,
+         note: 'Player left all zones - database will be updated with NULL values'
+       });
+     } else {
+       logger.debug('🏘️ ZONE UPDATE - Setting zone values', {
+         uuid,
+         updateData: {
+           regionId: updateData.regionId,
+           nodeId: updateData.nodeId,
+           cityId: updateData.cityId
+         }
+       });
+     }
 
-  async forceResync(): Promise<void> {
-    logger.info('🔄 Starting forced resynchronization');
-    await this.performFullSync();
-  }
+     this.batchService.queuePlayerUpdate(updateData);
+     
+   } catch (error) {
+     logger.error('Failed to sync player to database', {
+       uuid,
+       error: error instanceof Error ? error.message : 'Unknown error'
+     });
+   }
+ }
 
-  async forceFreshSync(): Promise<void> {
-    logger.info('🔄 Starting forced fresh synchronization');
-    
-    try {
-      await this.redisService.del('zones:metadata');
-      const chunkKeys = await this.redisService.keys('chunk:zone:*');
-      if (chunkKeys.length > 0) {
-        await this.redisService.del(chunkKeys);
-      }
-      logger.info('✅ Redis cache cleared for fresh sync');
-    } catch (error) {
-      logger.warn('Failed to clear Redis cache', { 
-        error: error instanceof Error ? error.message : 'Unknown error' 
-      });
-    }
+ /**
+  * Récupère le nom du joueur
+  */
+ private async getPlayerName(uuid: string): Promise<string> {
+   try {
+     const player = await this.databaseService.getPlayerByUuid(uuid);
+     if (player?.player_name) {
+       return player.player_name;
+     }
+     return `Player_${uuid.substring(0, 8)}`;
+   } catch (error) {
+     return `Player_${uuid.substring(0, 8)}`;
+   }
+ }
 
-    await this.performFullSync();
-  }
+ /**
+  * Formate les zones en cache pour les logs
+  */
+ private formatCachedZones(cachedZones: any): string {
+   if (!cachedZones) return 'none';
+   
+   const parts: string[] = [];
+   if (cachedZones.region_id) parts.push(`R${cachedZones.region_id}`);
+   if (cachedZones.node_id) parts.push(`N${cachedZones.node_id}`);
+   if (cachedZones.city_id) parts.push(`C${cachedZones.city_id}`);
+   
+   return parts.length > 0 ? parts.join('→') : 'wilderness';
+ }
 
-  async performCleanup(): Promise<{
-    deletedChunks: number;
-    deletedPlayers: number;
-    cacheCleared: boolean;
-    errors: string[];
-  }> {
-    logger.info('🧹 Starting cleanup process');
-    const errors: string[] = [];
-    let deletedChunks = 0;
-    let deletedPlayers = 0;
-    let cacheCleared = false;
+ // ========== PUBLIC API METHODS ==========
 
-    try {
-      const cleanup = await this.redisService.cleanupExpiredData();
-      deletedChunks = cleanup.deletedChunks;
-      deletedPlayers = cleanup.deletedPlayers;
+ async forceResync(): Promise<void> {
+   logger.info('🔄 Starting forced resynchronization');
+   await this.performFullSync();
+ }
 
-      try {
-        await this.redisService.del('zones:metadata');
-        cacheCleared = true;
-      } catch (error) {
-        errors.push('Failed to clear metadata cache');
-      }
+ async forceFreshSync(): Promise<void> {
+   logger.info('🔄 Starting forced fresh synchronization');
+   
+   try {
+     await this.redisService.del('zones:metadata');
+     const chunkKeys = await this.redisService.keys('chunk:zone:*');
+     if (chunkKeys.length > 0) {
+       await this.redisService.del(chunkKeys);
+     }
+     logger.info('✅ Redis cache cleared for fresh sync');
+   } catch (error) {
+     logger.warn('Failed to clear Redis cache', { 
+       error: error instanceof Error ? error.message : 'Unknown error' 
+     });
+   }
 
-      logger.info('✅ Cleanup completed', {
-        deletedChunks,
-        deletedPlayers,
-        cacheCleared,
-        errors: errors.length
-      });
+   await this.performFullSync();
+ }
 
-      return {
-        deletedChunks,
-        deletedPlayers,
-        cacheCleared,
-        errors
-      };
+ async performCleanup(): Promise<{
+   deletedChunks: number;
+   deletedPlayers: number;
+   cacheCleared: boolean;
+   errors: string[];
+ }> {
+   logger.info('🧹 Starting cleanup process');
+   const errors: string[] = [];
+   let deletedChunks = 0;
+   let deletedPlayers = 0;
+   let cacheCleared = false;
 
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
-      errors.push(errorMsg);
-      logger.error('❌ Cleanup failed', { error: errorMsg });
-      
-      return {
-        deletedChunks,
-        deletedPlayers,
-        cacheCleared,
-        errors
-      };
-    }
-  }
+   try {
+     const cleanup = await this.redisService.cleanupExpiredData();
+     deletedChunks = cleanup.deletedChunks;
+     deletedPlayers = cleanup.deletedPlayers;
 
-  // ========== STATUS AND MONITORING ==========
+     try {
+       await this.redisService.del('zones:metadata');
+       cacheCleared = true;
+     } catch (error) {
+       errors.push('Failed to clear metadata cache');
+     }
 
-  isReady(): boolean {
-    return this.serviceReady;
-  }
+     logger.info('✅ Cleanup completed', {
+       deletedChunks,
+       deletedPlayers,
+       cacheCleared,
+       errors: errors.length
+     });
 
-  getLastSyncTime(): Date | null {
-    return this.lastSyncTime;
-  }
+     return {
+       deletedChunks,
+       deletedPlayers,
+       cacheCleared,
+       errors
+     };
 
-  isSyncInProgress(): boolean {
-    return this.syncInProgress;
-  }
+   } catch (error) {
+     const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+     errors.push(errorMsg);
+     logger.error('❌ Cleanup failed', { error: errorMsg });
+     
+     return {
+       deletedChunks,
+       deletedPlayers,
+       cacheCleared,
+       errors
+     };
+   }
+ }
 
-  async getHealthStatus(): Promise<HealthStatus> {
-    const issues: string[] = [];
-    
-    if (!this.serviceReady) {
-      issues.push('Service not initialized');
-    }
+ // ========== STATUS AND MONITORING ==========
 
-    const redisHealthy = await this.redisService.ping().catch(() => false);
-    if (!redisHealthy) {
-      issues.push('Redis connection failed');
-    }
-    if (this.lastSyncTime && Date.now() - this.lastSyncTime.getTime() > 24 * 60 * 60 * 1000) {
+ isReady(): boolean {
+   return this.serviceReady;
+ }
+
+ getLastSyncTime(): Date | null {
+   return this.lastSyncTime;
+ }
+
+ isSyncInProgress(): boolean {
+   return this.syncInProgress;
+ }
+
+ async getHealthStatus(): Promise<HealthStatus> {
+   const issues: string[] = [];
+   
+   if (!this.serviceReady) {
+     issues.push('Service not initialized');
+   }
+
+   const redisHealthy = await this.redisService.ping().catch(() => false);
+   if (!redisHealthy) {
+     issues.push('Redis connection failed');
+   }
+   
+   if (this.lastSyncTime && Date.now() - this.lastSyncTime.getTime() > 24 * 60 * 60 * 1000) {
      issues.push('Last sync more than 24 hours ago');
    }
 
@@ -1101,6 +1154,7 @@ private async publishTransitionEvents(transition: any): Promise<void> {
      errors: this.stats.errors,
      transitionsDetected: this.stats.transitionsDetected,
      cacheCorrections: this.stats.cacheCorrections,
+     nullUpdatesProcessed: this.stats.nullUpdatesProcessed, // ✅ NOUVEAU
      performance: this.stats.performance
    };
  }
@@ -1177,10 +1231,39 @@ private async publishTransitionEvents(transition: any): Promise<void> {
            cityId: realityZones.cityId
          },
          cacheVsReality: {
-           regionMatch: (zones?.region_id || null) === (realityZones.regionId || null),
-           nodeMatch: (zones?.node_id || null) === (realityZones.nodeId || null),
-           cityMatch: (zones?.city_id || null) === (realityZones.cityId || null)
+           regionMatch: (zones?.region_id ?? null) === (realityZones.regionId ?? null),
+           nodeMatch: (zones?.node_id ?? null) === (realityZones.nodeId ?? null),
+           cityMatch: (zones?.city_id ?? null) === (realityZones.cityId ?? null)
          }
+       });
+     }
+
+     // ✅ NOUVEAU: Vérifier l'état en base de données
+     try {
+       const dbPlayer = await this.databaseService.getPlayerByUuid(uuid);
+       if (dbPlayer) {
+         logger.info('🗄️ DATABASE STATE', {
+           uuid,
+           database: {
+             regionId: dbPlayer.region_id,
+             nodeId: dbPlayer.node_id,
+             cityId: dbPlayer.city_id,
+             lastUpdated: dbPlayer.last_updated,
+             isOnline: dbPlayer.is_online
+           },
+           dbVsCache: {
+             regionMatch: (zones?.region_id ?? null) === (dbPlayer.region_id ?? null),
+             nodeMatch: (zones?.node_id ?? null) === (dbPlayer.node_id ?? null),
+             cityMatch: (zones?.city_id ?? null) === (dbPlayer.city_id ?? null)
+           }
+         });
+       } else {
+         logger.warn('⚠️ Player not found in database', { uuid });
+       }
+     } catch (dbError) {
+       logger.error('❌ Failed to get database state', {
+         uuid,
+         error: dbError instanceof Error ? dbError.message : 'Unknown error'
        });
      }
 
@@ -1190,6 +1273,68 @@ private async publishTransitionEvents(transition: any): Promise<void> {
        error: error instanceof Error ? error.message : 'Unknown error'
      });
    }
+ }
+
+ // ========== NOUVEAUX OUTILS DE DIAGNOSTIC ==========
+
+ /**
+  * ✅ NOUVEAU: Teste manuellement une mise à jour vers wilderness
+  */
+ async testWildernessUpdate(uuid: string): Promise<void> {
+   logger.info('🧪 TESTING WILDERNESS UPDATE', { uuid });
+   
+   try {
+     // Forcer une zone wilderness
+     const wildernessZoneData: ChunkZoneData = {
+       regionId: null,
+       regionName: null,
+       nodeId: null,
+       nodeName: null,
+       cityId: null,
+       cityName: null
+     };
+
+     // Simuler un chunk data
+     const mockChunkData = {
+       chunk_x: 0,
+       chunk_z: 0,
+       timestamp: Date.now()
+     };
+
+     logger.info('🧪 Forcing wilderness sync to database', {
+       uuid,
+       wildernessZoneData,
+       mockChunkData
+     });
+
+     await this.syncPlayerToDatabaseSilently(uuid, mockChunkData, wildernessZoneData);
+     
+     logger.info('✅ Wilderness test completed - check database for NULL values');
+   } catch (error) {
+     logger.error('❌ Wilderness test failed', {
+       uuid,
+       error: error instanceof Error ? error.message : 'Unknown error'
+     });
+   }
+ }
+
+ /**
+  * ✅ NOUVEAU: Statistiques des mises à jour null
+  */
+ getNullUpdateStats(): {
+   totalNullUpdates: number;
+   avgNullUpdatesPerHour: number;
+   lastNullUpdate: Date | null;
+ } {
+   const hoursRunning = this.lastSyncTime 
+     ? (Date.now() - this.lastSyncTime.getTime()) / (1000 * 60 * 60) 
+     : 1;
+
+   return {
+     totalNullUpdates: this.stats.nullUpdatesProcessed,
+     avgNullUpdatesPerHour: this.stats.nullUpdatesProcessed / Math.max(hoursRunning, 1),
+     lastNullUpdate: this.lastSyncTime
+   };
  }
 
  // ========== CLEANUP ==========
@@ -1215,6 +1360,7 @@ private async publishTransitionEvents(transition: any): Promise<void> {
        finalStats: {
          transitionsDetected: this.stats.transitionsDetected,
          cacheCorrections: this.stats.cacheCorrections,
+         nullUpdatesProcessed: this.stats.nullUpdatesProcessed, // ✅ NOUVEAU
          totalZonesProcessed: this.stats.zonesLoaded,
          totalChunksProcessed: this.stats.chunksProcessed
        }

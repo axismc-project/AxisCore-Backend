@@ -28,10 +28,11 @@ export interface PlayerPosition {
   timestamp: number;
 }
 
+// ✅ CORRECTION: Accepter null au lieu de undefined seulement
 export interface PlayerZones {
-  region_id?: number;
-  node_id?: number;
-  city_id?: number;
+  region_id?: number | null;  // ✅ Ajout de | null
+  node_id?: number | null;    // ✅ Ajout de | null
+  city_id?: number | null;    // ✅ Ajout de | null
   last_update: number;
 }
 

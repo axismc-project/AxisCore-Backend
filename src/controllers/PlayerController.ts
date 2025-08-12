@@ -23,7 +23,7 @@ class PlayerController {
   async handlePlayerConnection(req: Request, res: Response): Promise<void> {
     try {
       const { uuid, name, isOnline } = req.body;
-      
+
       if (!SecurityUtils.isValidUUID(uuid)) {
         res.status(400).json({
           error: 'Invalid UUID',
@@ -66,10 +66,10 @@ class PlayerController {
       });
 
     } catch (error) {
-      logger.error('Failed to handle player connection', { 
-        error: error instanceof Error ? error.message : 'Unknown error' 
+      logger.error('Failed to handle player connection', {
+        error: error instanceof Error ? error.message : 'Unknown error'
       });
-      res.status(500).json({ 
+      res.status(500).json({
         error: 'Server error',
         message: 'Unable to handle player connection'
       });
@@ -79,36 +79,36 @@ class PlayerController {
   async getPlayerInfo(req: Request, res: Response): Promise<void> {
     try {
       const { uuid } = req.params;
-      
+
       if (!SecurityUtils.isValidUUID(uuid)) {
-        res.status(400).json({ 
+        res.status(400).json({
           error: 'Invalid UUID',
           message: 'UUID must be in valid format'
         });
         return;
       }
-      
+
       const player = await this.db.getPlayerByUuid(uuid);
-      
+
       if (!player) {
-        res.status(404).json({ 
+        res.status(404).json({
           error: 'Player not found',
           message: `No player with UUID ${uuid}`
         });
         return;
       }
-      
+
       res.json({
         message: 'Player found',
         data: player
       });
-      
+
     } catch (error) {
-      logger.error('Failed to get player info', { 
+      logger.error('Failed to get player info', {
         uuid: req.params.uuid,
-        error: error instanceof Error ? error.message : 'Unknown error' 
+        error: error instanceof Error ? error.message : 'Unknown error'
       });
-      res.status(500).json({ 
+      res.status(500).json({
         error: 'Server error',
         message: 'Unable to get player info'
       });
@@ -119,9 +119,9 @@ class PlayerController {
     try {
       const { uuid } = req.params;
       const { name, x, y, z } = req.body;
-      
+
       if (!SecurityUtils.isValidUUID(uuid)) {
-        res.status(400).json({ 
+        res.status(400).json({
           error: 'Invalid UUID',
           message: 'UUID must be in valid format'
         });
@@ -135,7 +135,7 @@ class PlayerController {
         });
         return;
       }
-      
+
       if (!SecurityUtils.isValidCoordinate(x) || !SecurityUtils.isValidCoordinate(y) || !SecurityUtils.isValidCoordinate(z)) {
         res.status(400).json({
           error: 'Invalid coordinates',
@@ -196,13 +196,13 @@ class PlayerController {
           zones: zoneData
         }
       });
-      
+
     } catch (error) {
-      logger.error('Failed to update player position', { 
+      logger.error('Failed to update player position', {
         uuid: req.params.uuid,
-        error: error instanceof Error ? error.message : 'Unknown error' 
+        error: error instanceof Error ? error.message : 'Unknown error'
       });
-      res.status(500).json({ 
+      res.status(500).json({
         error: 'Server error',
         message: 'Unable to update player position'
       });
@@ -213,15 +213,15 @@ class PlayerController {
     try {
       const { uuid } = req.params;
       const { chunkX, chunkZ } = req.body;
-      
+
       if (!SecurityUtils.isValidUUID(uuid)) {
-        res.status(400).json({ 
+        res.status(400).json({
           error: 'Invalid UUID',
           message: 'UUID must be in valid format'
         });
         return;
       }
-      
+
       if (!SecurityUtils.isValidChunkCoordinate(chunkX) || !SecurityUtils.isValidChunkCoordinate(chunkZ)) {
         res.status(400).json({
           error: 'Invalid chunk coordinates',
@@ -236,11 +236,14 @@ class PlayerController {
       // Get zone information for this chunk
       const zoneData = await this.redis.getChunkZone(chunkX, chunkZ);
 
+      // Dans updatePlayerPosition et updatePlayerChunk, corriger les assignations :
+
+      // ✅ CORRECTION lignes 77-79 et 141-143
       if (zoneData?.regionId || zoneData?.nodeId || zoneData?.cityId) {
         await this.redis.setPlayerZones(uuid, {
-          region_id: zoneData.regionId || undefined,   // ✅ null → undefined
-          node_id: zoneData.nodeId || undefined,       // ✅ null → undefined
-          city_id: zoneData.cityId || undefined,       // ✅ null → undefined
+          region_id: zoneData.regionId ?? null,   // ✅ null au lieu de undefined
+          node_id: zoneData.nodeId ?? null,       // ✅ null au lieu de undefined
+          city_id: zoneData.cityId ?? null,       // ✅ null au lieu de undefined
           last_update: Date.now()
         });
       }
@@ -254,13 +257,13 @@ class PlayerController {
           zones: zoneData
         }
       });
-      
+
     } catch (error) {
-      logger.error('Failed to update player chunk', { 
+      logger.error('Failed to update player chunk', {
         uuid: req.params.uuid,
-        error: error instanceof Error ? error.message : 'Unknown error' 
+        error: error instanceof Error ? error.message : 'Unknown error'
       });
-      res.status(500).json({ 
+      res.status(500).json({
         error: 'Server error',
         message: 'Unable to update player chunk'
       });
@@ -270,36 +273,36 @@ class PlayerController {
   async getPlayerCurrentZones(req: Request, res: Response): Promise<void> {
     try {
       const { uuid } = req.params;
-      
+
       if (!SecurityUtils.isValidUUID(uuid)) {
-        res.status(400).json({ 
+        res.status(400).json({
           error: 'Invalid UUID',
           message: 'UUID must be in valid format'
         });
         return;
       }
-      
+
       const zones = await this.redis.getPlayerZones(uuid);
-      
+
       if (!zones) {
-        res.status(404).json({ 
+        res.status(404).json({
           error: 'Player zones not found',
           message: `No zone data for player ${uuid}`
         });
         return;
       }
-      
+
       res.json({
         message: 'Player zones retrieved',
         data: zones
       });
-      
+
     } catch (error) {
-      logger.error('Failed to get player zones', { 
+      logger.error('Failed to get player zones', {
         uuid: req.params.uuid,
-        error: error instanceof Error ? error.message : 'Unknown error' 
+        error: error instanceof Error ? error.message : 'Unknown error'
       });
-      res.status(500).json({ 
+      res.status(500).json({
         error: 'Server error',
         message: 'Unable to get player zones'
       });
@@ -315,17 +318,17 @@ class PlayerController {
         connectionQueue: this.connectionBatchService.getQueueSize(),
         connectionProcessing: this.connectionBatchService.isQueueProcessing()
       };
-      
+
       res.json({
         message: 'Batch service statistics',
         data: stats
       });
-      
+
     } catch (error) {
-      logger.error('Failed to get batch stats', { 
-        error: error instanceof Error ? error.message : 'Unknown error' 
+      logger.error('Failed to get batch stats', {
+        error: error instanceof Error ? error.message : 'Unknown error'
       });
-      res.status(500).json({ 
+      res.status(500).json({
         error: 'Server error',
         message: 'Unable to get batch statistics'
       });
@@ -338,17 +341,17 @@ class PlayerController {
         this.batchService.forceFlush(),
         this.connectionBatchService.forceFlush()
       ]);
-      
+
       res.json({
         message: 'All batches flushed successfully',
         timestamp: new Date().toISOString()
       });
-      
+
     } catch (error) {
-      logger.error('Failed to flush batches', { 
-        error: error instanceof Error ? error.message : 'Unknown error' 
+      logger.error('Failed to flush batches', {
+        error: error instanceof Error ? error.message : 'Unknown error'
       });
-      res.status(500).json({ 
+      res.status(500).json({
         error: 'Server error',
         message: 'Unable to flush batches'
       });

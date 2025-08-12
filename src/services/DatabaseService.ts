@@ -4,6 +4,7 @@ import { Region, Node, City, ZoneHierarchy, PostgresNotification } from '../mode
 import { Player, PlayerWithZones } from '../models/Player';
 import { logger } from '../utils/logger';
 
+// ✅ CORRECTION: Accepter null au lieu de undefined seulement
 interface PlayerBatchUpdate {
   uuid: string;
   name: string;
@@ -12,11 +13,12 @@ interface PlayerBatchUpdate {
   z: number;
   chunkX: number;
   chunkZ: number;
-  regionId?: number;
-  nodeId?: number;
-  cityId?: number;
+  regionId?: number | null;  // ✅ Ajout de | null
+  nodeId?: number | null;    // ✅ Ajout de | null
+  cityId?: number | null;    // ✅ Ajout de | null
   timestamp: number;
 }
+
 interface PlayerConnectionBatchUpdate {
   uuid: string;
   name: string;

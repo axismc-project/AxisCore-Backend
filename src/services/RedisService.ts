@@ -400,58 +400,66 @@ export class RedisService {
     }
   }
 
-  async setPlayerZones(uuid: string, zones: PlayerZones): Promise<void> {
-    const key = `player:zones:${uuid}`;
-    
-    try {
-      const data: Record<string, string> = {
-        last_update: zones.last_update.toString()
-      };
+async setPlayerZones(uuid: string, zones: PlayerZones): Promise<void> {
+  const key = `player:zones:${uuid}`;
+  
+  try {
+    const data: Record<string, string> = {
+      last_update: zones.last_update.toString()
+    };
 
-      if (zones.region_id !== undefined) data.region_id = zones.region_id.toString();
-      if (zones.node_id !== undefined) data.node_id = zones.node_id.toString();
-      if (zones.city_id !== undefined) data.city_id = zones.city_id.toString();
-
-      await this.hSet(key, data);
-      await this.expire(key, parseInt(process.env.CACHE_TTL_CHUNKS || '86400'));
-    } catch (error) {
-      logger.error('Failed to set player zones', { 
-        uuid, 
-        error: error instanceof Error ? error.message : 'Unknown error' 
-      });
-      throw new Error('Unable to save player zones');
+    // ✅ CORRECTION: Gérer null correctement
+    if (zones.region_id !== undefined && zones.region_id !== null) {
+      data.region_id = zones.region_id.toString();
     }
-  }
-
-  async getPlayerZones(uuid: string): Promise<PlayerZones | null> {
-    const key = `player:zones:${uuid}`;
-    
-    try {
-      const data = await this.hGetAll(key);
-      
-      if (Object.keys(data).length === 0) {
-        return null;
-      }
-
-      const lastUpdate = data.last_update;
-      if (!lastUpdate) {
-        return null;
-      }
-      
-      return {
-        region_id: data.region_id && data.region_id !== '' ? parseInt(data.region_id) : undefined,
-        node_id: data.node_id && data.node_id !== '' ? parseInt(data.node_id) : undefined,
-        city_id: data.city_id && data.city_id !== '' ? parseInt(data.city_id) : undefined,
-        last_update: parseInt(lastUpdate)
-      };
-    } catch (error) {
-      logger.error('Failed to get player zones', { 
-        uuid, 
-        error: error instanceof Error ? error.message : 'Unknown error' 
-      });
-      throw new Error('Unable to fetch player zones');
+    if (zones.node_id !== undefined && zones.node_id !== null) {
+      data.node_id = zones.node_id.toString();
     }
+    if (zones.city_id !== undefined && zones.city_id !== null) {
+      data.city_id = zones.city_id.toString();
+    }
+
+    await this.hSet(key, data);
+    await this.expire(key, parseInt(process.env.CACHE_TTL_CHUNKS || '86400'));
+  } catch (error) {
+    logger.error('Failed to set player zones', { 
+      uuid, 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
+    throw new Error('Unable to save player zones');
   }
+}
+
+async getPlayerZones(uuid: string): Promise<PlayerZones | null> {
+  const key = `player:zones:${uuid}`;
+  
+  try {
+    const data = await this.hGetAll(key);
+    
+    if (Object.keys(data).length === 0) {
+      return null;
+    }
+
+    const lastUpdate = data.last_update;
+    if (!lastUpdate) {
+      return null;
+    }
+    
+    return {
+      // ✅ CORRECTION: Retourner null au lieu de undefined pour les valeurs vides
+      region_id: data.region_id && data.region_id !== '' ? parseInt(data.region_id) : null,
+      node_id: data.node_id && data.node_id !== '' ? parseInt(data.node_id) : null,
+      city_id: data.city_id && data.city_id !== '' ? parseInt(data.city_id) : null,
+      last_update: parseInt(lastUpdate)
+    };
+  } catch (error) {
+    logger.error('Failed to get player zones', { 
+      uuid, 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
+    throw new Error('Unable to fetch player zones');
+  }
+}
 
   // ========== KEYSPACE NOTIFICATIONS LISTENER ==========
 async subscribeToKeyspaceEvents(callback: (uuid: string, operation: string) => void): Promise<void> {

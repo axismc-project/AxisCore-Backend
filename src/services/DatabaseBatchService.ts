@@ -1,6 +1,7 @@
 import { DatabaseService } from './DatabaseService';
 import { logger } from '../utils/logger';
 
+// ✅ CORRECTION: Accepter null au lieu de undefined seulement
 interface PlayerUpdate {
   uuid: string;
   name: string;
@@ -9,10 +10,10 @@ interface PlayerUpdate {
   z: number;
   chunkX: number;
   chunkZ: number;
-  regionId?: number;
-  nodeId?: number;
-  cityId?: number;
-  // ✅ FIX: timestamp is automatically added in queuePlayerUpdate
+  regionId?: number | null;  // ✅ Ajout de | null
+  nodeId?: number | null;    // ✅ Ajout de | null
+  cityId?: number | null;    // ✅ Ajout de | null
+  // timestamp is automatically added in queuePlayerUpdate
 }
 
 export class DatabaseBatchService {
@@ -43,7 +44,7 @@ export class DatabaseBatchService {
     });
   }
 
-  // ✅ FIX: timestamp is added automatically here
+  // ✅ timestamp is added automatically here
   queuePlayerUpdate(update: PlayerUpdate): void {
     const playerUpdate = {
       ...update,
