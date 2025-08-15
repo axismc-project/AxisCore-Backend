@@ -2,7 +2,7 @@ import { DatabaseService } from './DatabaseService';
 import { logger } from '../utils/logger';
 
 interface PlayerConnection {
-  uuid: string;
+  uuid: string;  // ✅ CHANGEMENT: server_uuid
   name: string;
   isOnline: boolean;
   timestamp: number;
@@ -18,7 +18,7 @@ export class PlayerConnectionBatchService {
   constructor(
     private db: DatabaseService,
     batchSize: number = 500,
-    flushIntervalMs: number = 10000 // 10 seconds
+    flushIntervalMs: number = 10000
   ) {
     this.batchSize = batchSize;
     this.flushInterval = flushIntervalMs;
@@ -42,10 +42,9 @@ export class PlayerConnectionBatchService {
       timestamp: Date.now()
     };
 
-    // Remplacer la connexion précédente pour ce joueur (plus récente)
+    // ✅ CHANGEMENT: Utiliser server_uuid comme clé
     this.pendingConnections.set(connection.uuid, playerConnection);
 
-    // Force flush if batch size reached (gestion des pics de trafic)
     if (this.pendingConnections.size >= this.batchSize) {
       setImmediate(() => this.flushBatch());
     }
@@ -79,7 +78,6 @@ export class PlayerConnectionBatchService {
         retrying: true
       });
 
-      // Re-queue failed connections (simple retry strategy)
       connections.forEach(connection => {
         this.pendingConnections.set(connection.uuid, connection);
       });
@@ -106,7 +104,6 @@ export class PlayerConnectionBatchService {
       this.batchInterval = null;
     }
 
-    // Final flush
     await this.flushBatch();
     
     logger.info('Player connection batch service stopped');

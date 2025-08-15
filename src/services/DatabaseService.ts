@@ -55,6 +55,158 @@ private safeJsonParse(jsonString: any, fallback: any = []): any {
   }
 }
 
+// ========== NOUVELLES MÉTHODES POUR server_uuid ==========
+
+async getPlayerByServerUuid(server_uuid: string): Promise<PlayerWithZones | null> {
+  const query = `
+    SELECT 
+      p.*,
+      r.name as region_name,
+      n.name as node_name,
+      c.name as city_name
+    FROM players p
+    LEFT JOIN regions r ON p.region_id = r.id
+    LEFT JOIN nodes n ON p.node_id = n.id
+    LEFT JOIN cities c ON p.city_id = c.id
+    WHERE p.server_uuid = $1
+  `;
+
+  try {
+    const result = await this.pool.query(query, [server_uuid]);
+    if (result.rows.length === 0) return null;
+
+    const row = result.rows[0];
+    return {
+      ...row,
+      last_updated: new Date(row.last_updated)
+    };
+  } catch (error) {
+    logger.error('Failed to fetch player by server UUID', { 
+      server_uuid, 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
+    throw new Error('Unable to fetch player');
+  }
+}
+
+async getPlayerByPlayerUuid(player_uuid: string): Promise<PlayerWithZones | null> {
+  const query = `
+    SELECT 
+      p.*,
+      r.name as region_name,
+      n.name as node_name,
+      c.name as city_name
+    FROM players p
+    LEFT JOIN regions r ON p.region_id = r.id
+    LEFT JOIN nodes n ON p.node_id = n.id
+    LEFT JOIN cities c ON p.city_id = c.id
+    WHERE p.player_uuid = $1
+  `;
+
+  try {
+    const result = await this.pool.query(query, [player_uuid]);
+    if (result.rows.length === 0) return null;
+
+    const row = result.rows[0];
+    return {
+      ...row,
+      last_updated: new Date(row.last_updated)
+    };
+  } catch (error) {
+    logger.error('Failed to fetch player by player UUID', { 
+      player_uuid, 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
+    throw new Error('Unable to fetch player');
+  }
+}
+
+async getPlayerByPlayerName(player_name: string): Promise<PlayerWithZones | null> {
+  const query = `
+    SELECT 
+      p.*,
+      r.name as region_name,
+      n.name as node_name,
+      c.name as city_name
+    FROM players p
+    LEFT JOIN regions r ON p.region_id = r.id
+    LEFT JOIN nodes n ON p.node_id = n.id
+    LEFT JOIN cities c ON p.city_id = c.id
+    WHERE p.player_name = $1
+    ORDER BY p.last_updated DESC
+    LIMIT 1
+  `;
+
+  try {
+    const result = await this.pool.query(query, [player_name]);
+    if (result.rows.length === 0) return null;
+
+    const row = result.rows[0];
+    return {
+      ...row,
+      last_updated: new Date(row.last_updated)
+    };
+  } catch (error) {
+    logger.error('Failed to fetch player by name', { 
+      player_name, 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
+    throw new Error('Unable to fetch player');
+  }
+}
+
+async updatePlayerServerUuid(
+  player_uuid: string, 
+  new_server_uuid: string, 
+  name: string, 
+  is_online: boolean
+): Promise<void> {
+  const query = `
+    UPDATE players 
+    SET server_uuid = $1, 
+        player_name = $2, 
+        is_online = $3, 
+        last_updated = CURRENT_TIMESTAMP
+    WHERE player_uuid = $4
+  `;
+
+  try {
+    await this.pool.query(query, [new_server_uuid, name, is_online, player_uuid]);
+  } catch (error) {
+    logger.error('Failed to update player server UUID', { 
+      player_uuid, 
+      new_server_uuid, 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
+    throw new Error('Unable to update player server UUID');
+  }
+}
+
+async createPlayerWithUuids(
+  server_uuid: string, 
+  player_uuid: string, 
+  name: string, 
+  is_online: boolean
+): Promise<void> {
+  const query = `
+    INSERT INTO players (
+      server_uuid, player_uuid, player_name, x, y, z, chunk_x, chunk_z,
+      region_id, node_id, city_id, last_updated, is_online, redis_synced
+    ) VALUES ($1, $2, $3, 0, 0, 0, 0, 0, NULL, NULL, NULL, CURRENT_TIMESTAMP, $4, false)
+  `;
+
+  try {
+    await this.pool.query(query, [server_uuid, player_uuid, name, is_online]);
+  } catch (error) {
+    logger.error('Failed to create player with UUIDs', { 
+      server_uuid, 
+      player_uuid, 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
+    throw new Error('Unable to create player');
+  }
+}
+
   // ========== ZONES ==========
 async getAllRegions(): Promise<Region[]> {
   const query = 'SELECT * FROM regions WHERE is_active = true ORDER BY name';

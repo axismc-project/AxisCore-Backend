@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 export const PlayerSchema = z.object({
   id: z.number().int().positive(),
+  server_uuid: z.string().uuid(),
   player_uuid: z.string().uuid(),
   player_name: z.string().min(1).max(16),
   x: z.number(),
@@ -28,11 +29,10 @@ export interface PlayerPosition {
   timestamp: number;
 }
 
-// ✅ CORRECTION: Accepter null au lieu de undefined seulement
 export interface PlayerZones {
-  region_id?: number | null;  // ✅ Ajout de | null
-  node_id?: number | null;    // ✅ Ajout de | null
-  city_id?: number | null;    // ✅ Ajout de | null
+  region_id?: number | null;
+  node_id?: number | null;
+  city_id?: number | null;
   last_update: number;
 }
 
@@ -40,4 +40,15 @@ export interface PlayerWithZones extends Player {
   region_name?: string;
   node_name?: string;
   city_name?: string;
+}
+
+export interface UserLogRequest {
+  server_uuid: string;
+  is_online: boolean;
+  name: string;
+}
+
+export interface MojangProfile {
+  id: string;
+  name: string;
 }

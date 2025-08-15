@@ -3,10 +3,10 @@ import { RedisService } from '../services/RedisService';
 import { DatabaseService } from '../services/DatabaseService';
 import { DatabaseBatchService } from '../services/DatabaseBatchService';
 import { PlayerConnectionBatchService } from '../services/PlayerConnectionBatchService';
+import { MojangApiService } from '../services/MojangApiService';
 import { SecurityUtils } from '../utils/security';
 import { logger } from '../utils/logger';
 
-// ✅ FIX: Suppression du mot-clé export de la déclaration de classe
 class PlayerController {
   private batchService: DatabaseBatchService;
   private connectionBatchService: PlayerConnectionBatchService;
@@ -19,15 +19,14 @@ class PlayerController {
     this.connectionBatchService = new PlayerConnectionBatchService(this.db);
   }
 
-  // ========== PLAYER CONNECTION/DISCONNECTION ==========
-  async handlePlayerConnection(req: Request, res: Response): Promise<void> {
+  async handleUserLog(req: Request, res: Response): Promise<void> {
     try {
-      const { uuid, name, isOnline } = req.body;
+      const { server_uuid, name, is_online } = req.body;
 
-      if (!SecurityUtils.isValidUUID(uuid)) {
+      if (!SecurityUtils.isValidUUID(server_uuid)) {
         res.status(400).json({
-          error: 'Invalid UUID',
-          message: 'UUID must be in valid format'
+          error: 'Invalid server_uuid',
+          message: 'server_uuid must be in valid UUID format'
         });
         return;
       }
@@ -40,40 +39,186 @@ class PlayerController {
         return;
       }
 
-      if (typeof isOnline !== 'boolean') {
+      if (typeof is_online !== 'boolean') {
         res.status(400).json({
-          error: 'Invalid isOnline',
-          message: 'isOnline must be a boolean'
+          error: 'Invalid is_online',
+          message: 'is_online must be a boolean'
         });
         return;
       }
 
-      // Ajouter à la file d'attente de connexions
-      this.connectionBatchService.queuePlayerConnection({
-        uuid,
-        name,
-        isOnline
-      });
+      const result = await this.handlePlayerIdentification(server_uuid, name, is_online);
 
       res.json({
-        message: `Player ${isOnline ? 'connection' : 'disconnection'} queued successfully`,
-        data: {
-          uuid,
-          name,
-          isOnline,
-          queued: true
-        }
+        message: `Player ${is_online ? 'connection' : 'disconnection'} processed successfully`,
+        data: result
       });
 
     } catch (error) {
-      logger.error('Failed to handle player connection', {
+      logger.error('Failed to handle user log', {
         error: error instanceof Error ? error.message : 'Unknown error'
       });
       res.status(500).json({
         error: 'Server error',
-        message: 'Unable to handle player connection'
+        message: 'Unable to process user log'
       });
     }
+  }
+
+// ✅ FIX: Méthode handlePlayerIdentification corrigée
+private async handlePlayerIdentification(server_uuid: string, name: string, is_online: boolean): Promise<any> {
+  try {
+    // 1. Chercher le joueur par server_uuid
+    const existingPlayer = await this.db.getPlayerByServerUuid(server_uuid);
+    
+    if (existingPlayer) {
+      logger.info('👤 Existing player found by server_uuid', { 
+        server_uuid, 
+        player_uuid: existingPlayer.player_uuid,
+        name 
+      });
+      
+      await this.updateExistingPlayer(existingPlayer, name, is_online);
+      
+      return {
+        server_uuid,
+        player_uuid: existingPlayer.player_uuid,
+        name,
+        is_online,
+        action: 'updated'
+      };
+    }
+
+    // 2. Nouveau server_uuid - chercher d'abord par nom pour voir si on a déjà l'UUID Mojang
+    const existingPlayerByName = await this.db.getPlayerByPlayerName(name);
+    
+    if (existingPlayerByName) {
+      // On connaît déjà ce joueur (changement de server_uuid/pseudo)
+      const player_uuid = existingPlayerByName.player_uuid;
+      
+      logger.info('🔄 Player found by name with existing Mojang UUID', { 
+        server_uuid,
+        player_uuid,
+        name,
+        old_server_uuid: existingPlayerByName.server_uuid
+      });
+      
+      // Mettre à jour avec le nouveau server_uuid
+      await this.updatePlayerServerUuid(existingPlayerByName, server_uuid, name, is_online);
+      
+      return {
+        server_uuid,
+        player_uuid,
+        name,
+        is_online,
+        action: 'server_uuid_updated'
+      };
+    }
+
+    // 3. Complètement nouveau - récupérer UUID Mojang
+    logger.info('🆕 New player, fetching Mojang UUID', { server_uuid, name });
+    
+    // ✅ FIX: Gestion correcte du type nullable
+    const mojangUuid = await MojangApiService.getPlayerUUIDByUsername(name);
+    
+    if (!mojangUuid) {
+      throw new Error(`Player "${name}" not found on Mojang servers`);
+    }
+    
+    // ✅ FIX: mojangUuid est maintenant garantie non-null
+    const player_uuid: string = mojangUuid;
+
+    // 4. Vérifier si ce player_uuid existe déjà (changement de pseudo complet)
+    const existingMojangPlayer = await this.db.getPlayerByPlayerUuid(player_uuid);
+    
+    if (existingMojangPlayer) {
+      logger.info('🔄 Player changed username (found by Mojang UUID)', { 
+        old_server_uuid: existingMojangPlayer.server_uuid,
+        new_server_uuid: server_uuid,
+        player_uuid,
+        old_name: existingMojangPlayer.player_name,
+        new_name: name
+      });
+      
+      await this.updatePlayerServerUuid(existingMojangPlayer, server_uuid, name, is_online);
+      
+      return {
+        server_uuid,
+        player_uuid,
+        name,
+        is_online,
+        action: 'username_changed'
+      };
+    }
+
+    // 5. Complètement nouveau joueur
+    logger.info('✨ Creating new player', { server_uuid, player_uuid, name });
+    
+    await this.createNewPlayer(server_uuid, player_uuid, name, is_online);
+    
+    return {
+      server_uuid,
+      player_uuid,
+      name,
+      is_online,
+      action: 'created'
+    };
+
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('not found on Mojang')) {
+      throw error;
+    }
+    
+    logger.error('Error in player identification', {
+      server_uuid,
+      name,
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+    throw new Error('Failed to identify player');
+  }
+}
+
+  private async updateExistingPlayer(player: any, name: string, is_online: boolean): Promise<void> {
+    const updateData = {
+      uuid: player.server_uuid,
+      name,
+      x: player.x || 0,
+      y: player.y || 0,
+      z: player.z || 0,
+      chunkX: player.chunk_x || 0,
+      chunkZ: player.chunk_z || 0,
+      regionId: player.region_id,
+      nodeId: player.node_id,
+      cityId: player.city_id
+    };
+
+    this.batchService.queuePlayerUpdate(updateData);
+    
+    this.connectionBatchService.queuePlayerConnection({
+      uuid: player.server_uuid,
+      name,
+      isOnline: is_online
+    });
+  }
+
+  private async updatePlayerServerUuid(player: any, new_server_uuid: string, name: string, is_online: boolean): Promise<void> {
+    await this.db.updatePlayerServerUuid(player.player_uuid, new_server_uuid, name, is_online);
+    
+    this.connectionBatchService.queuePlayerConnection({
+      uuid: new_server_uuid,
+      name,
+      isOnline: is_online
+    });
+  }
+
+  private async createNewPlayer(server_uuid: string, player_uuid: string, name: string, is_online: boolean): Promise<void> {
+    await this.db.createPlayerWithUuids(server_uuid, player_uuid, name, is_online);
+    
+    this.connectionBatchService.queuePlayerConnection({
+      uuid: server_uuid,
+      name,
+      isOnline: is_online
+    });
   }
 
   async getPlayerInfo(req: Request, res: Response): Promise<void> {
@@ -88,12 +233,12 @@ class PlayerController {
         return;
       }
 
-      const player = await this.db.getPlayerByUuid(uuid);
+      const player = await this.db.getPlayerByServerUuid(uuid);
 
       if (!player) {
         res.status(404).json({
           error: 'Player not found',
-          message: `No player with UUID ${uuid}`
+          message: `No player with server UUID ${uuid}`
         });
         return;
       }
@@ -147,10 +292,8 @@ class PlayerController {
       const chunkX = Math.floor(x / 16);
       const chunkZ = Math.floor(z / 16);
 
-      // Get zone information for this chunk
       const zoneData = await this.redis.getChunkZone(chunkX, chunkZ);
 
-      // ✅ FIX: Conversion explicite null → undefined avec gestion propre
       this.batchService.queuePlayerUpdate({
         uuid,
         name,
@@ -159,12 +302,11 @@ class PlayerController {
         z,
         chunkX,
         chunkZ,
-        regionId: zoneData?.regionId || undefined,  // ✅ null ou number → undefined si null
-        nodeId: zoneData?.nodeId || undefined,      // ✅ null ou number → undefined si null
-        cityId: zoneData?.cityId || undefined       // ✅ null ou number → undefined si null
+        regionId: zoneData?.regionId || null,
+        nodeId: zoneData?.nodeId || null,
+        cityId: zoneData?.cityId || null
       });
 
-      // Update Redis cache
       await this.redis.setPlayerPosition(uuid, {
         x,
         y,
@@ -176,9 +318,9 @@ class PlayerController {
 
       if (zoneData?.regionId || zoneData?.nodeId || zoneData?.cityId) {
         await this.redis.setPlayerZones(uuid, {
-          region_id: zoneData.regionId || undefined,   // ✅ null → undefined
-          node_id: zoneData.nodeId || undefined,       // ✅ null → undefined
-          city_id: zoneData.cityId || undefined,       // ✅ null → undefined
+          region_id: zoneData.regionId ?? null,
+          node_id: zoneData.nodeId ?? null,
+          city_id: zoneData.cityId ?? null,
           last_update: Date.now()
         });
       }
@@ -230,20 +372,15 @@ class PlayerController {
         return;
       }
 
-      // Update chunk in Redis
       await this.redis.setPlayerChunk(uuid, chunkX, chunkZ);
 
-      // Get zone information for this chunk
       const zoneData = await this.redis.getChunkZone(chunkX, chunkZ);
 
-      // Dans updatePlayerPosition et updatePlayerChunk, corriger les assignations :
-
-      // ✅ CORRECTION lignes 77-79 et 141-143
       if (zoneData?.regionId || zoneData?.nodeId || zoneData?.cityId) {
         await this.redis.setPlayerZones(uuid, {
-          region_id: zoneData.regionId ?? null,   // ✅ null au lieu de undefined
-          node_id: zoneData.nodeId ?? null,       // ✅ null au lieu de undefined
-          city_id: zoneData.cityId ?? null,       // ✅ null au lieu de undefined
+          region_id: zoneData.regionId ?? null,
+          node_id: zoneData.nodeId ?? null,
+          city_id: zoneData.cityId ?? null,
           last_update: Date.now()
         });
       }
@@ -309,7 +446,6 @@ class PlayerController {
     }
   }
 
-  // ========== BATCH SERVICE ENDPOINTS ==========
   async getBatchStats(req: Request, res: Response): Promise<void> {
     try {
       const stats = {
@@ -358,7 +494,6 @@ class PlayerController {
     }
   }
 
-  // ========== CLEANUP ==========
   async destroy(): Promise<void> {
     await Promise.all([
       this.batchService.destroy(),
@@ -367,5 +502,4 @@ class PlayerController {
   }
 }
 
-// ✅ FIX: Export nommé uniquement à la fin
 export { PlayerController };

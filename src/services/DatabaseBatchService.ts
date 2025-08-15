@@ -1,20 +1,21 @@
 import { DatabaseService } from './DatabaseService';
 import { logger } from '../utils/logger';
 
-// ✅ CORRECTION: Accepter null au lieu de undefined seulement
+
 interface PlayerUpdate {
-  uuid: string;
+  uuid: string;  // server_uuid
   name: string;
   x: number;
   y: number;
   z: number;
   chunkX: number;
   chunkZ: number;
-  regionId?: number | null;  // ✅ Ajout de | null
-  nodeId?: number | null;    // ✅ Ajout de | null
-  cityId?: number | null;    // ✅ Ajout de | null
-  // timestamp is automatically added in queuePlayerUpdate
+  regionId?: number | null;
+  nodeId?: number | null;
+  cityId?: number | null;
 }
+
+// Le reste du fichier reste identique
 
 export class DatabaseBatchService {
   private pendingUpdates = new Map<string, PlayerUpdate & { timestamp: number }>();
