@@ -1,23 +1,92 @@
+// src/controllers/PlayerController.ts
 import { Request, Response } from 'express';
 import { RedisService } from '../services/RedisService';
 import { DatabaseService } from '../services/DatabaseService';
-import { DatabaseBatchService } from '../services/DatabaseBatchService';
-import { PlayerConnectionBatchService } from '../services/PlayerConnectionBatchService';
 import { MojangApiService } from '../services/MojangApiService';
 import { SecurityUtils } from '../utils/security';
 import { logger } from '../utils/logger';
 
+// Interface pour les mises à jour batch simplifiées
+interface PlayerBatchUpdate {
+  uuid: string;
+  name: string;
+  x: number;
+  y: number;
+  z: number;
+  chunkX: number;
+  chunkZ: number;
+  regionId?: number | null;
+  nodeId?: number | null;
+  cityId?: number | null;
+}
+
 class PlayerController {
-  private batchService: DatabaseBatchService;
-  private connectionBatchService: PlayerConnectionBatchService;
+  private batchUpdates = new Map<string, PlayerBatchUpdate & { timestamp: number }>();
+  private batchInterval: NodeJS.Timeout | null = null;
+  private isProcessingBatch = false;
 
   constructor(
     private redis: RedisService,
     private db: DatabaseService
   ) {
-    this.batchService = new DatabaseBatchService(this.db);
-    this.connectionBatchService = new PlayerConnectionBatchService(this.db);
+    this.startBatchProcessor();
   }
+
+  // ========== BATCH PROCESSING SIMPLIFIÉ ==========
+  
+  private startBatchProcessor(): void {
+    const interval = parseInt(process.env.BATCH_INTERVAL || '5000'); // 5 seconds
+    
+    this.batchInterval = setInterval(async () => {
+      await this.processBatch();
+    }, interval);
+    
+    logger.info('PlayerController batch processor started', { interval });
+  }
+
+  private async processBatch(): Promise<void> {
+    if (this.isProcessingBatch || this.batchUpdates.size === 0) {
+      return;
+    }
+
+    this.isProcessingBatch = true;
+    const updates = Array.from(this.batchUpdates.values());
+    this.batchUpdates.clear();
+
+    try {
+      // Process in smaller batches
+      const batchSize = 50;
+      for (let i = 0; i < updates.length; i += batchSize) {
+        const batch = updates.slice(i, i + batchSize);
+        await this.db.batchUpdatePlayers(batch);
+      }
+      
+      logger.debug('Batch processed successfully', { 
+        playersUpdated: updates.length 
+      });
+    } catch (error) {
+      logger.error('Batch processing failed', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        playersAffected: updates.length
+      });
+      
+      // Re-queue failed updates
+      updates.forEach(update => {
+        this.batchUpdates.set(update.uuid, update);
+      });
+    } finally {
+      this.isProcessingBatch = false;
+    }
+  }
+
+  private queuePlayerUpdate(update: PlayerBatchUpdate): void {
+    this.batchUpdates.set(update.uuid, {
+      ...update,
+      timestamp: Date.now()
+    });
+  }
+
+  // ========== HANDLERS ==========
 
   async handleUserLog(req: Request, res: Response): Promise<void> {
     try {
@@ -65,160 +134,125 @@ class PlayerController {
     }
   }
 
-// ✅ FIX: Méthode handlePlayerIdentification corrigée
-private async handlePlayerIdentification(server_uuid: string, name: string, is_online: boolean): Promise<any> {
-  try {
-    // 1. Chercher le joueur par server_uuid
-    const existingPlayer = await this.db.getPlayerByServerUuid(server_uuid);
-    
-    if (existingPlayer) {
-      logger.info('👤 Existing player found by server_uuid', { 
-        server_uuid, 
-        player_uuid: existingPlayer.player_uuid,
-        name 
-      });
+  private async handlePlayerIdentification(server_uuid: string, name: string, is_online: boolean): Promise<any> {
+    try {
+      // 1. Chercher le joueur par server_uuid
+      const existingPlayer = await this.db.getPlayerByServerUuid(server_uuid);
       
-      await this.updateExistingPlayer(existingPlayer, name, is_online);
+      if (existingPlayer) {
+        logger.info('👤 Existing player found by server_uuid', { 
+          server_uuid, 
+          player_uuid: existingPlayer.player_uuid,
+          name 
+        });
+        
+        await this.updateExistingPlayer(existingPlayer, name, is_online);
+        
+        return {
+          server_uuid,
+          player_uuid: existingPlayer.player_uuid,
+          name,
+          is_online,
+          action: 'updated'
+        };
+      }
+
+      // 2. Nouveau server_uuid - chercher d'abord par nom
+      const existingPlayerByName = await this.db.getPlayerByPlayerName(name);
+      
+      if (existingPlayerByName) {
+        const player_uuid = existingPlayerByName.player_uuid;
+        
+        logger.info('🔄 Player found by name with existing Mojang UUID', { 
+          server_uuid,
+          player_uuid,
+          name,
+          old_server_uuid: existingPlayerByName.server_uuid
+        });
+        
+        await this.updatePlayerServerUuid(existingPlayerByName, server_uuid, name, is_online);
+        
+        return {
+          server_uuid,
+          player_uuid,
+          name,
+          is_online,
+          action: 'server_uuid_updated'
+        };
+      }
+
+      // 3. Complètement nouveau - récupérer UUID Mojang
+      logger.info('🆕 New player, fetching Mojang UUID', { server_uuid, name });
+      
+      const mojangUuid = await MojangApiService.getPlayerUUIDByUsername(name);
+      
+      if (!mojangUuid) {
+        throw new Error(`Player "${name}" not found on Mojang servers`);
+      }
+      
+      const player_uuid: string = mojangUuid;
+
+      // 4. Vérifier si ce player_uuid existe déjà
+      const existingMojangPlayer = await this.db.getPlayerByPlayerUuid(player_uuid);
+      
+      if (existingMojangPlayer) {
+        logger.info('🔄 Player changed username', { 
+          old_server_uuid: existingMojangPlayer.server_uuid,
+          new_server_uuid: server_uuid,
+          player_uuid,
+          old_name: existingMojangPlayer.player_name,
+          new_name: name
+        });
+        
+        await this.updatePlayerServerUuid(existingMojangPlayer, server_uuid, name, is_online);
+        
+        return {
+          server_uuid,
+          player_uuid,
+          name,
+          is_online,
+          action: 'username_changed'
+        };
+      }
+
+      // 5. Complètement nouveau joueur
+      logger.info('✨ Creating new player', { server_uuid, player_uuid, name });
+      
+      await this.createNewPlayer(server_uuid, player_uuid, name, is_online);
       
       return {
         server_uuid,
-        player_uuid: existingPlayer.player_uuid,
-        name,
-        is_online,
-        action: 'updated'
-      };
-    }
-
-    // 2. Nouveau server_uuid - chercher d'abord par nom pour voir si on a déjà l'UUID Mojang
-    const existingPlayerByName = await this.db.getPlayerByPlayerName(name);
-    
-    if (existingPlayerByName) {
-      // On connaît déjà ce joueur (changement de server_uuid/pseudo)
-      const player_uuid = existingPlayerByName.player_uuid;
-      
-      logger.info('🔄 Player found by name with existing Mojang UUID', { 
-        server_uuid,
         player_uuid,
         name,
-        old_server_uuid: existingPlayerByName.server_uuid
+        is_online,
+        action: 'created'
+      };
+
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('not found on Mojang')) {
+        throw error;
+      }
+      
+      logger.error('Error in player identification', {
+        server_uuid,
+        name,
+        error: error instanceof Error ? error.message : 'Unknown error'
       });
-      
-      // Mettre à jour avec le nouveau server_uuid
-      await this.updatePlayerServerUuid(existingPlayerByName, server_uuid, name, is_online);
-      
-      return {
-        server_uuid,
-        player_uuid,
-        name,
-        is_online,
-        action: 'server_uuid_updated'
-      };
+      throw new Error('Failed to identify player');
     }
-
-    // 3. Complètement nouveau - récupérer UUID Mojang
-    logger.info('🆕 New player, fetching Mojang UUID', { server_uuid, name });
-    
-    // ✅ FIX: Gestion correcte du type nullable
-    const mojangUuid = await MojangApiService.getPlayerUUIDByUsername(name);
-    
-    if (!mojangUuid) {
-      throw new Error(`Player "${name}" not found on Mojang servers`);
-    }
-    
-    // ✅ FIX: mojangUuid est maintenant garantie non-null
-    const player_uuid: string = mojangUuid;
-
-    // 4. Vérifier si ce player_uuid existe déjà (changement de pseudo complet)
-    const existingMojangPlayer = await this.db.getPlayerByPlayerUuid(player_uuid);
-    
-    if (existingMojangPlayer) {
-      logger.info('🔄 Player changed username (found by Mojang UUID)', { 
-        old_server_uuid: existingMojangPlayer.server_uuid,
-        new_server_uuid: server_uuid,
-        player_uuid,
-        old_name: existingMojangPlayer.player_name,
-        new_name: name
-      });
-      
-      await this.updatePlayerServerUuid(existingMojangPlayer, server_uuid, name, is_online);
-      
-      return {
-        server_uuid,
-        player_uuid,
-        name,
-        is_online,
-        action: 'username_changed'
-      };
-    }
-
-    // 5. Complètement nouveau joueur
-    logger.info('✨ Creating new player', { server_uuid, player_uuid, name });
-    
-    await this.createNewPlayer(server_uuid, player_uuid, name, is_online);
-    
-    return {
-      server_uuid,
-      player_uuid,
-      name,
-      is_online,
-      action: 'created'
-    };
-
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('not found on Mojang')) {
-      throw error;
-    }
-    
-    logger.error('Error in player identification', {
-      server_uuid,
-      name,
-      error: error instanceof Error ? error.message : 'Unknown error'
-    });
-    throw new Error('Failed to identify player');
   }
-}
 
   private async updateExistingPlayer(player: any, name: string, is_online: boolean): Promise<void> {
-    const updateData = {
-      uuid: player.server_uuid,
-      name,
-      x: player.x || 0,
-      y: player.y || 0,
-      z: player.z || 0,
-      chunkX: player.chunk_x || 0,
-      chunkZ: player.chunk_z || 0,
-      regionId: player.region_id,
-      nodeId: player.node_id,
-      cityId: player.city_id
-    };
-
-    this.batchService.queuePlayerUpdate(updateData);
-    
-    this.connectionBatchService.queuePlayerConnection({
-      uuid: player.server_uuid,
-      name,
-      isOnline: is_online
-    });
+    // Update database directly for connection status
+    await this.db.updatePlayerServerUuid(player.player_uuid, player.server_uuid, name, is_online);
   }
 
   private async updatePlayerServerUuid(player: any, new_server_uuid: string, name: string, is_online: boolean): Promise<void> {
     await this.db.updatePlayerServerUuid(player.player_uuid, new_server_uuid, name, is_online);
-    
-    this.connectionBatchService.queuePlayerConnection({
-      uuid: new_server_uuid,
-      name,
-      isOnline: is_online
-    });
   }
 
   private async createNewPlayer(server_uuid: string, player_uuid: string, name: string, is_online: boolean): Promise<void> {
     await this.db.createPlayerWithUuids(server_uuid, player_uuid, name, is_online);
-    
-    this.connectionBatchService.queuePlayerConnection({
-      uuid: server_uuid,
-      name,
-      isOnline: is_online
-    });
   }
 
   async getPlayerInfo(req: Request, res: Response): Promise<void> {
@@ -292,21 +326,7 @@ private async handlePlayerIdentification(server_uuid: string, name: string, is_o
       const chunkX = Math.floor(x / 16);
       const chunkZ = Math.floor(z / 16);
 
-      const zoneData = await this.redis.getChunkZone(chunkX, chunkZ);
-
-      this.batchService.queuePlayerUpdate({
-        uuid,
-        name,
-        x,
-        y,
-        z,
-        chunkX,
-        chunkZ,
-        regionId: zoneData?.regionId || null,
-        nodeId: zoneData?.nodeId || null,
-        cityId: zoneData?.cityId || null
-      });
-
+      // Update Redis immediately
       await this.redis.setPlayerPosition(uuid, {
         x,
         y,
@@ -316,6 +336,9 @@ private async handlePlayerIdentification(server_uuid: string, name: string, is_o
         timestamp: Date.now()
       });
 
+      // Get zone data
+      const zoneData = await this.redis.getChunkZone(chunkX, chunkZ);
+
       if (zoneData?.regionId || zoneData?.nodeId || zoneData?.cityId) {
         await this.redis.setPlayerZones(uuid, {
           region_id: zoneData.regionId ?? null,
@@ -324,6 +347,20 @@ private async handlePlayerIdentification(server_uuid: string, name: string, is_o
           last_update: Date.now()
         });
       }
+
+      // Queue for database update
+      this.queuePlayerUpdate({
+        uuid,
+        name,
+        x,
+        y,
+        z,
+        chunkX,
+        chunkZ,
+        regionId: zoneData?.regionId ?? null,
+        nodeId: zoneData?.nodeId ?? null,
+        cityId: zoneData?.cityId ?? null
+      });
 
       res.json({
         message: 'Position updated successfully',
@@ -407,52 +444,11 @@ private async handlePlayerIdentification(server_uuid: string, name: string, is_o
     }
   }
 
-  async getPlayerCurrentZones(req: Request, res: Response): Promise<void> {
-    try {
-      const { uuid } = req.params;
-
-      if (!SecurityUtils.isValidUUID(uuid)) {
-        res.status(400).json({
-          error: 'Invalid UUID',
-          message: 'UUID must be in valid format'
-        });
-        return;
-      }
-
-      const zones = await this.redis.getPlayerZones(uuid);
-
-      if (!zones) {
-        res.status(404).json({
-          error: 'Player zones not found',
-          message: `No zone data for player ${uuid}`
-        });
-        return;
-      }
-
-      res.json({
-        message: 'Player zones retrieved',
-        data: zones
-      });
-
-    } catch (error) {
-      logger.error('Failed to get player zones', {
-        uuid: req.params.uuid,
-        error: error instanceof Error ? error.message : 'Unknown error'
-      });
-      res.status(500).json({
-        error: 'Server error',
-        message: 'Unable to get player zones'
-      });
-    }
-  }
-
   async getBatchStats(req: Request, res: Response): Promise<void> {
     try {
       const stats = {
-        positionQueue: this.batchService.getQueueSize(),
-        positionProcessing: this.batchService.isQueueProcessing(),
-        connectionQueue: this.connectionBatchService.getQueueSize(),
-        connectionProcessing: this.connectionBatchService.isQueueProcessing()
+        pendingUpdates: this.batchUpdates.size,
+        isProcessing: this.isProcessingBatch
       };
 
       res.json({
@@ -473,32 +469,34 @@ private async handlePlayerIdentification(server_uuid: string, name: string, is_o
 
   async forceFlushBatch(req: Request, res: Response): Promise<void> {
     try {
-      await Promise.all([
-        this.batchService.forceFlush(),
-        this.connectionBatchService.forceFlush()
-      ]);
+      await this.processBatch();
 
       res.json({
-        message: 'All batches flushed successfully',
+        message: 'Batch flushed successfully',
         timestamp: new Date().toISOString()
       });
 
     } catch (error) {
-      logger.error('Failed to flush batches', {
+      logger.error('Failed to flush batch', {
         error: error instanceof Error ? error.message : 'Unknown error'
       });
       res.status(500).json({
         error: 'Server error',
-        message: 'Unable to flush batches'
+        message: 'Unable to flush batch'
       });
     }
   }
 
   async destroy(): Promise<void> {
-    await Promise.all([
-      this.batchService.destroy(),
-      this.connectionBatchService.destroy()
-    ]);
+    if (this.batchInterval) {
+      clearInterval(this.batchInterval);
+      this.batchInterval = null;
+    }
+    
+    // Final batch processing
+    await this.processBatch();
+    
+    logger.info('PlayerController destroyed');
   }
 }
 

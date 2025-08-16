@@ -1,7 +1,8 @@
+// src/controllers/ZoneController.ts
 import { Request, Response } from 'express';
 import { RedisService } from '../services/RedisService';
 import { DatabaseService } from '../services/DatabaseService';
-import { ZoneSyncService } from '../services/ZoneSyncService';
+import { OptimizedSyncService } from '../services/OptimizedSyncService';
 import { ChunkCalculatorService } from '../services/ChunkCalculatorService';
 import { ChunkZoneDataSchema } from '../models/Zone';
 import { SecurityUtils } from '../utils/security';
@@ -11,7 +12,7 @@ export class ZoneController {
   constructor(
     private redis: RedisService,
     private db: DatabaseService,
-    private syncService: ZoneSyncService,
+    private syncService: OptimizedSyncService,
     private calculator: ChunkCalculatorService
   ) {}
 
@@ -192,7 +193,6 @@ export class ZoneController {
     }
   }
 
-  // ========== ZONE CREATION & EDITING ==========
   async createZone(req: Request, res: Response): Promise<void> {
     try {
       const { zoneType } = req.params;
@@ -232,23 +232,6 @@ export class ZoneController {
         return;
       }
 
-      // Validate parent-child relationships
-      if (zoneType === 'node' && !parentId) {
-        res.status(400).json({
-          error: 'Missing parent',
-          message: 'Node must have a region_id'
-        });
-        return;
-      }
-
-      if (zoneType === 'city' && !parentId) {
-        res.status(400).json({
-          error: 'Missing parent', 
-          message: 'City must have a node_id'
-        });
-        return;
-      }
-
       // Create zone
       const newZoneId = await this.db.createZone(
         zoneType as any, 
@@ -283,93 +266,9 @@ export class ZoneController {
     }
   }
 
-  async addZonePoint(req: Request, res: Response): Promise<void> {
-    try {
-      const { zoneType, zoneId } = req.params;
-      const { chunkX, chunkZ, insertAfter } = req.body;
-      
-      if (!['region', 'node', 'city'].includes(zoneType)) {
-        res.status(400).json({
-          error: 'Invalid zone type',
-          message: 'Type must be: region, node, or city'
-        });
-        return;
-      }
-      
-      const id = parseInt(zoneId);
-      if (isNaN(id) || id <= 0) {
-        res.status(400).json({
-          error: 'Invalid zone ID',
-          message: 'ID must be a positive integer'
-        });
-        return;
-      }
-      
-      if (!SecurityUtils.isValidChunkCoordinate(chunkX) || !SecurityUtils.isValidChunkCoordinate(chunkZ)) {
-        res.status(400).json({
-          error: 'Invalid chunk coordinates',
-          message: 'chunkX and chunkZ must be valid integers within bounds'
-        });
-        return;
-      }
-
-      // Get current zone
-      const zone = await this.db.getZoneById(zoneType as any, id);
-      if (!zone) {
-        res.status(404).json({
-          error: 'Zone not found',
-          message: `Zone ${zoneType}:${id} not found`
-        });
-        return;
-      }
-
-      // Add point to polygon
-      const newPolygon = [...zone.chunk_boundary];
-      const insertIndex = insertAfter !== undefined ? insertAfter + 1 : newPolygon.length;
-      newPolygon.splice(insertIndex, 0, [chunkX, chunkZ]);
-
-      // Validate new polygon
-      const validation = this.calculator.validatePolygon(newPolygon);
-      if (!validation.valid) {
-        res.status(400).json({
-          error: 'Invalid polygon',
-          message: validation.error
-        });
-        return;
-      }
-
-      // Update zone
-      await this.db.updateZonePolygon(zoneType as any, id, newPolygon);
-
-      res.json({
-        message: 'Point added successfully',
-        data: {
-          zoneType,
-          zoneId: id,
-          newPoint: [chunkX, chunkZ],
-          insertedAt: insertIndex,
-          newPolygon: newPolygon,
-          polygonStats: this.calculator.getPolygonStats(newPolygon)
-        }
-      });
-      
-    } catch (error) {
-      logger.error('Failed to add zone point', { 
-        zoneType: req.params.zoneType, 
-        zoneId: req.params.zoneId,
-        error: error instanceof Error ? error.message : 'Unknown error' 
-      });
-      res.status(500).json({ 
-        error: 'Server error',
-        message: 'Unable to add zone point'
-      });
-    }
-  }
-
-  // ========== ENDPOINTS STATISTIQUES ==========
   async getStats(req: Request, res: Response): Promise<void> {
     try {
-      const stats = await this.syncService.getDetailedStats();
+      const stats = this.syncService.getStats();
       
       res.json({
         message: 'Statistics retrieved',
@@ -388,35 +287,6 @@ export class ZoneController {
     }
   }
 
-  async getHealth(req: Request, res: Response): Promise<void> {
-    try {
-      const health = await this.syncService.getHealthStatus();
-      
-      const statusCode = health.isHealthy ? 200 : 503;
-      
-      res.status(statusCode).json({
-        message: health.isHealthy ? 'Service healthy' : 'Issues detected',
-        timestamp: new Date().toISOString(),
-        data: health
-      });
-      
-    } catch (error) {
-      logger.error('Failed to get health status', { 
-        error: error instanceof Error ? error.message : 'Unknown error' 
-      });
-      res.status(500).json({ 
-        error: 'Server error',
-        message: 'Unable to check service health',
-        timestamp: new Date().toISOString(),
-        data: {
-          isHealthy: false,
-          issues: ['Internal health service error']
-        }
-      });
-    }
-  }
-
-  // ========== ENDPOINTS ADMINISTRATION ==========
   async forceSync(req: Request, res: Response): Promise<void> {
     try {
       const authHeader = req.headers.authorization;
@@ -428,17 +298,19 @@ export class ZoneController {
         return;
       }
       
-      if (this.syncService.isSyncInProgress()) {
+      if (!this.syncService.isReady()) {
         res.status(409).json({ 
           error: 'Conflict',
-          message: 'Synchronization already in progress'
+          message: 'Synchronization service not ready'
         });
         return;
       }
       
       // Start sync in background
-      this.syncService.forceFreshSync().catch(error => {
-        logger.error('Forced sync error', { error: error instanceof Error ? error.message : 'Unknown error' });
+      this.syncService.forceFullSync().catch((error: Error) => {
+        logger.error('Forced sync error', { 
+          error: error.message 
+        });
       });
       
       res.json({
@@ -453,36 +325,6 @@ export class ZoneController {
       res.status(500).json({ 
         error: 'Server error',
         message: 'Unable to start synchronization'
-      });
-    }
-  }
-
-  async performCleanup(req: Request, res: Response): Promise<void> {
-    try {
-      const authHeader = req.headers.authorization;
-      if (!authHeader || !this.isValidAdminToken(authHeader)) {
-        res.status(401).json({ 
-          error: 'Unauthorized',
-          message: 'Admin token required'
-        });
-        return;
-      }
-      
-      const result = await this.syncService.performCleanup();
-      
-      res.json({
-        message: 'Cleanup performed',
-        timestamp: new Date().toISOString(),
-        data: result
-      });
-      
-    } catch (error) {
-      logger.error('Failed to perform cleanup', { 
-        error: error instanceof Error ? error.message : 'Unknown error' 
-      });
-      res.status(500).json({ 
-        error: 'Server error',
-        message: 'Unable to perform cleanup'
       });
     }
   }
