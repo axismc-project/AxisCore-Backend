@@ -54,7 +54,6 @@ class Application {
  constructor() {
    this.app = express();
    this.setupMiddleware();
-   this.setupRoutes();
    this.setupErrorHandling();
  }
 
@@ -74,6 +73,8 @@ class Application {
      
      // 3. Initialize controllers
      this.initializeControllers();
+
+     this.setupRoutes();
      
      // 4. Load zones into Redis cache
      await this.initializeZoneCache();
