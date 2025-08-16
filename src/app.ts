@@ -5,17 +5,18 @@ import helmet from 'helmet';
 import { createServer } from 'http';
 import dotenv from 'dotenv';
 
-// Services
+// Core Services
 import { DatabaseService } from './services/DatabaseService';
 import { RedisService } from './services/RedisService';
-import { OptimizedSyncService } from './services/OptimizedSyncService';
-import { ChunkCalculatorService } from './services/ChunkCalculatorService';
+import { ZoneTransitionService } from './services/ZoneTransitionService';
+import { BatchSyncService } from './services/BatchSyncService';
 import { ApiKeyService } from './services/ApiKeyService';
-import { ZoneTransitionDetector } from './services/ZoneTransitionDetector';
+import { ZoneLoaderService } from './services/ZoneLoaderService';
+import { ChunkCalculatorService } from './services/ChunkCalculatorService';
 
 // Controllers
-import { ZoneController } from './controllers/ZoneController';
 import { PlayerController } from './controllers/PlayerController';
+import { ZoneController } from './controllers/ZoneController';
 
 // WebSocket
 import { FixedZoneWebSocketServer } from './websocket/FixedZoneWebSocketServer';
@@ -23,934 +24,173 @@ import { FixedZoneWebSocketServer } from './websocket/FixedZoneWebSocketServer';
 // Utils
 import { logger } from './utils/logger';
 import { SecurityUtils } from './utils/security';
-import { RedisConfig } from './config/redis';
 import { DatabaseConfig } from './config/database';
 
-// Load environment variables
 dotenv.config();
 
 class Application {
-  private app: express.Application;
-  private server: any;
-  private wsServer: FixedZoneWebSocketServer | null = null;
-  
-  // Core Services
-  private dbService!: DatabaseService;
-  private redisService!: RedisService;
-  private calculatorService!: ChunkCalculatorService;
-  private apiKeyService!: ApiKeyService;
-  private optimizedSyncService!: OptimizedSyncService;
-  
-  // Controllers
-  private zoneController!: ZoneController;
-  private playerController!: PlayerController;
-
-  // Application state
-  private isShuttingDown = false;
-  private startupTime = Date.now();
-
-  constructor() {
-    this.app = express();
-    this.initializeServices();
-    this.initializeControllers();
-    this.setupMiddleware();
-    this.setupRoutes();
-    this.setupErrorHandling();
-  }
-
-  // ========== SERVICE INITIALIZATION ==========
-  
-  private initializeServices(): void {
-    try {
-      logger.info('🔧 Initializing core services...');
-      
-      // Core services
-      this.dbService = new DatabaseService();
-      this.redisService = new RedisService();
-      this.calculatorService = new ChunkCalculatorService();
-      this.apiKeyService = new ApiKeyService();
-      
-      // Optimized sync service with proper dependencies
-      this.optimizedSyncService = new OptimizedSyncService(
-        this.dbService,
-        this.redisService,
-        this.calculatorService,
-        new ZoneTransitionDetector()
-      );
-      
-      logger.info('✅ Core services initialized');
-    } catch (error) {
-      logger.error('❌ Failed to initialize services', { 
-        error: error instanceof Error ? error.message : 'Unknown error' 
-      });
-      throw error;
-    }
-  }
-
-  private initializeControllers(): void {
-    try {
-      logger.info('🎮 Initializing controllers...');
-      
-      this.zoneController = new ZoneController(
-        this.redisService,
-        this.dbService,
-        this.optimizedSyncService as any, // Compatible interface
-        this.calculatorService
-      );
-      
-      this.playerController = new PlayerController(
-        this.redisService,
-        this.dbService
-      );
-      
-      logger.info('✅ Controllers initialized');
-    } catch (error) {
-      logger.error('❌ Failed to initialize controllers', { 
-        error: error instanceof Error ? error.message : 'Unknown error' 
-      });
-      throw error;
-    }
-  }
-
-  // ========== MIDDLEWARE SETUP ==========
-  
-  private setupMiddleware(): void {
-    // Graceful shutdown check
-    this.app.use((req, res, next) => {
-      if (this.isShuttingDown) {
-        res.status(503).json({
-          error: 'Service unavailable',
-          message: 'Application is shutting down',
-          timestamp: new Date().toISOString()
-        });
-        return;
-      }
-      next();
-    });
-
-    // Security headers
-    this.app.use(helmet({
-      contentSecurityPolicy: false,
-      crossOriginEmbedderPolicy: false
-    }));
-    
-    // CORS configuration
-    this.app.use(cors({
-      origin: process.env.CORS_ORIGIN || '*',
-      credentials: true,
-      methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key']
-    }));
-    
-    // Body parsing
-    this.app.use(express.json({ 
-      limit: '10mb',
-      strict: true,
-      type: 'application/json'
-    }));
-    this.app.use(express.urlencoded({ 
-      extended: true,
-      limit: '10mb'
-    }));
-    
-    // Request logging middleware
-    this.app.use((req, res, next) => {
-      const start = Date.now();
-      const originalSend = res.send;
-      
-      res.send = function(data) {
-        const duration = Date.now() - start;
-        const apiKey = (req as any).apiKey;
-        
-        logger.info('HTTP Request', {
-          method: req.method,
-          path: req.path,
-          statusCode: res.statusCode,
-          durationMs: duration,
-          ip: req.ip,
-          userAgent: req.get('User-Agent'),
-          apiKeyName: apiKey?.keyName || 'anonymous'
-        });
-        return originalSend.call(this, data);
-      };
-      
-      next();
-    });
-
-    // Additional security headers
-    this.app.use((req, res, next) => {
-      res.setHeader('X-Content-Type-Options', 'nosniff');
-      res.setHeader('X-Frame-Options', 'DENY');
-      res.setHeader('X-XSS-Protection', '1; mode=block');
-      res.setHeader('X-Powered-By', 'Minecraft-Zones-Backend-Fixed');
-      next();
-    });
-
-    // API Key authentication for protected routes
-    this.app.use('/api', this.authenticateApiKey.bind(this));
-  }
-
-  // ========== AUTHENTICATION MIDDLEWARE ==========
-  
-  private async authenticateApiKey(req: express.Request, res: express.Response, next: express.NextFunction): Promise<void> {
-    const publicEndpoints = [
-      '/api/',
-      '/api/health',
-      '/api/websocket/test'
-    ];
-
-    if (publicEndpoints.some(endpoint => req.path === endpoint)) {
-      next();
-      return;
-    }
-
-    const authHeader = req.headers.authorization;
-    const apiKeyHeader = req.headers['x-api-key'] as string;
-    
-    let apiKey: string | null = null;
-
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      apiKey = authHeader.replace('Bearer ', '');
-    } else if (apiKeyHeader) {
-      apiKey = apiKeyHeader;
-    }
-
-    if (!apiKey) {
-      res.status(401).json({
-        error: 'Authentication required',
-        message: 'API key required in Authorization header (Bearer <key>) or X-API-Key header',
-        endpoints: {
-          public: publicEndpoints,
-          authentication: ['Bearer token', 'X-API-Key header']
-        }
-      });
-      return;
-    }
-
-    try {
-      const validatedKey = await this.apiKeyService.validateApiKey(apiKey);
-      
-      if (!validatedKey) {
-        res.status(401).json({
-          error: 'Invalid API key',
-          message: 'The provided API key is invalid, expired, or inactive'
-        });
-        return;
-      }
-
-      const requiredPermission = this.getRequiredPermission(req.method, req.path);
-      
-      if (!this.apiKeyService.hasPermission(validatedKey, requiredPermission)) {
-        res.status(403).json({
-          error: 'Insufficient permissions',
-          message: `This API key does not have permission: ${requiredPermission}`,
-          required: requiredPermission,
-          available: validatedKey.permissions
-        });
-        return;
-      }
-
-      const rateLimitOk = await this.apiKeyService.checkRateLimit(
-        validatedKey.id, 
-        req.path, 
-        validatedKey.rateLimitPerMinute
-      );
-
-      if (!rateLimitOk) {
-        res.status(429).json({
-          error: 'Rate limit exceeded',
-          message: `Too many requests. Limit: ${validatedKey.rateLimitPerMinute} requests per minute`,
-          retryAfter: 60,
-          keyName: validatedKey.keyName
-        });
-        return;
-      }
-
-      // Record usage asynchronously
-      this.apiKeyService.recordUsage(validatedKey.id, req.path).catch(error => {
-        logger.error('Failed to record API usage', { 
-          keyId: validatedKey.id, 
-          endpoint: req.path, 
-          error: error instanceof Error ? error.message : 'Unknown error' 
-        });
-      });
-
-      (req as any).apiKey = validatedKey;
-      next();
-    } catch (error) {
-      logger.error('Authentication error', { 
-        error: error instanceof Error ? error.message : 'Unknown error' 
-      });
-      res.status(500).json({
-        error: 'Authentication error',
-        message: 'Unable to validate API key'
-      });
-    }
-  }
-
-  private getRequiredPermission(method: string, path: string): string {
-    // Admin routes
-    if (path.startsWith('/api/admin/')) {
-      return 'admin:*';
-    }
-
-    // Zone routes
-    if (path.includes('/api/zone/') && method === 'POST') {
-      return 'zone:write';
-    }
-    if (path.includes('/api/zone/') || path.includes('/api/chunk/')) {
-      return 'zone:read';
-    }
-
-    // Player routes
-    if (path.includes('/api/player/') && (method === 'POST' || method === 'PUT')) {
-      return 'player:write';
-    }
-    if (path.includes('/api/player/')) {
-      return 'player:read';
-    }
-
-    // Sync routes
-    if (path.includes('/api/sync/')) {
-      return 'stats:read';
-    }
-
-    // Default
-    return 'api:read';
-  }
-
-  // ========== ROUTE SETUP ==========
-  
-  private setupRoutes(): void {
-    // ========== PUBLIC ROUTES ==========
-    
-    this.app.get('/', (req, res) => {
-      const uptime = Date.now() - this.startupTime;
-      
-      res.json({
-        name: 'Minecraft Zones Backend',
-        version: '2.0.0',
-        status: 'running',
-        environment: process.env.NODE_ENV || 'development',
-        timestamp: new Date().toISOString(),
-        uptime: Math.floor(uptime / 1000),
-        features: [
-          '✅ Optimized bidirectional Redis ↔ PostgreSQL sync',
-          '✅ Fixed WebSocket zone events with real-time broadcasting',
-          '✅ Smart chunk calculation with intelligent queue system',
-          '✅ Proper server_uuid / player_uuid distinction',
-          '✅ Enhanced keyspace notifications for position tracking',
-          '✅ Compressed WebSocket with zone transition filtering'
-        ],
-        architecture: {
-          sync: 'OptimizedSyncService with priority queue',
-          websocket: 'FixedZoneWebSocketServer with compression',
-          redis: 'Multi-client setup (main, pub, sub, keyspace)',
-          database: 'PostgreSQL with connection pooling',
-          realTime: 'Sub-5ms zone transition detection'
-        },
-        endpoints: {
-          zones: '/api/chunk/:x/:z, /api/zone/:type/:id',
-          players: '/api/player/userlog, /api/player/:uuid/position',
-          sync: '/api/sync/status, /api/admin/sync/force',
-          monitoring: '/api/health, /api/websocket/test',
-          websocket: 'ws://localhost:3000/ws/zones?api_key=xxx'
-        }
-      });
-    });
-
-    this.app.get('/api/health', async (req, res) => {
-      try {
-        const [syncStats, redisHealth] = await Promise.all([
-          this.optimizedSyncService.getStats(),
-          this.redisService.isHealthy()
-        ]);
-
-        const isHealthy = syncStats.isReady && redisHealth.overall;
-        const statusCode = isHealthy ? 200 : 503;
-        
-        res.status(statusCode).json({
-          status: isHealthy ? 'healthy' : 'unhealthy',
-          timestamp: new Date().toISOString(),
-          uptime: Math.floor((Date.now() - this.startupTime) / 1000),
-          services: {
-            sync: {
-              ready: syncStats.isReady,
-              pendingItems: syncStats.pendingItems,
-              errors: syncStats.errors
-            },
-            redis: redisHealth,
-            database: await DatabaseConfig.testConnection(),
-            websocket: this.wsServer?.getConnectedClientsCount() || 0
-          },
-          performance: syncStats.performance
-        });
-      } catch (error) {
-        res.status(500).json({
-          status: 'error',
-          error: 'Health check failed',
-          message: error instanceof Error ? error.message : 'Unknown error',
-          timestamp: new Date().toISOString()
-        });
-      }
-    });
-
-    this.app.get('/api/websocket/test', (req, res) => {
-      const clientsCount = this.wsServer?.getConnectedClientsCount() || 0;
-      const clients = this.wsServer?.getConnectedClients() || [];
-      
-      res.json({
-        websocket: {
-          status: 'active',
-          endpoint: `ws://${req.get('host')}/ws/zones`,
-          connectedClients: clientsCount,
-          clients: clients,
-          authentication: {
-            required: true,
-            methods: ['?api_key=xxx', 'Authorization: Bearer xxx'],
-            permissions: 'zone:read required'
-          },
-          testingGuide: {
-            step1: 'Create an API key with zone:read permission',
-            step2: 'Connect to WebSocket with authentication',
-            step3: 'Move a player between zones in Minecraft',
-            step4: 'Observe real-time zone_event messages',
-            expectedEvents: [
-              'zone_event with action: enter/leave',
-              'zoneType: region/node/city',
-              'Real-time player transitions'
-            ]
-          },
-          troubleshooting: {
-            noEvents: 'Check if player is actually changing zones',
-            authFailed: 'Verify API key has zone:read permission',
-            noConnection: 'Check WebSocket URL and authentication'
-          }
-        }
-      });
-    });
-
-    // ========== PROTECTED ROUTES ==========
-
-    // API Key Management (Admin only)
-    this.app.post('/api/admin/api-keys', this.createApiKey.bind(this));
-    this.app.delete('/api/admin/api-keys/:keyName', this.revokeApiKey.bind(this));
-    this.app.get('/api/admin/api-keys/stats', this.getApiKeyStats.bind(this));
-    this.app.get('/api/admin/api-keys', this.listApiKeys.bind(this));
-
-    // Zone Endpoints
-    this.app.get('/api/chunk/:chunkX/:chunkZ', 
-      this.validateChunkParams.bind(this),
-      this.zoneController.getChunkZone.bind(this.zoneController)
-    );
-    
-    this.app.get('/api/zones/hierarchy', 
-      this.zoneController.getZoneHierarchy.bind(this.zoneController)
-    );
-    
-    this.app.get('/api/zone/:zoneType/:zoneId', 
-      this.validateZoneParams.bind(this),
-      this.zoneController.getZoneById.bind(this.zoneController)
-    );
-    
-    this.app.get('/api/zone/:zoneType/:zoneId/players', 
-      this.validateZoneParams.bind(this),
-      this.zoneController.getPlayersInZone.bind(this.zoneController)
-    );
-
-    this.app.post('/api/zone/:zoneType/create',
-      this.zoneController.createZone.bind(this.zoneController)
-    );
-
-    // Player Endpoints
-    this.app.post('/api/player/userlog', 
-      this.playerController.handleUserLog.bind(this.playerController)
-    );
-
-    this.app.get('/api/player/:uuid', 
-      this.validateUUIDParam.bind(this),
-      this.playerController.getPlayerInfo.bind(this.playerController)
-    );
-    
-    this.app.post('/api/player/:uuid/position', 
-      this.validateUUIDParam.bind(this),
-      this.validatePositionBody.bind(this),
-      this.playerController.updatePlayerPosition.bind(this.playerController)
-    );
-
-    this.app.post('/api/player/:uuid/chunk', 
-      this.validateUUIDParam.bind(this),
-      this.validateChunkBody.bind(this),
-      this.playerController.updatePlayerChunk.bind(this.playerController)
-    );
-
-    // Sync & Monitoring Endpoints
-    this.app.get('/api/sync/status', this.getSyncStatus.bind(this));
-    this.app.post('/api/admin/sync/force', this.forceSync.bind(this));
-    this.app.get('/api/stats', this.getStats.bind(this));
-    this.app.get('/api/system', this.getSystemInfo.bind(this));
-
-    // ========== 404 HANDLER ==========
-    this.app.use('*', (req, res) => {
-      res.status(404).json({
-        error: 'Endpoint not found',
-        message: `${req.method} ${req.originalUrl} does not exist`,
-        timestamp: new Date().toISOString(),
-        availableEndpoints: {
-          public: ['GET /', 'GET /api/health', 'GET /api/websocket/test'],
-          zones: ['GET /api/chunk/:x/:z', 'GET /api/zones/hierarchy'],
-          players: ['POST /api/player/userlog', 'POST /api/player/:uuid/position'],
-          monitoring: ['GET /api/sync/status', 'GET /api/stats'],
-          websocket: 'ws://localhost:3000/ws/zones?api_key=xxx'
-        }
-      });
-    });
-  }
-
-  // ========== API KEY MANAGEMENT ==========
-  
-  private async createApiKey(req: express.Request, res: express.Response): Promise<void> {
-    try {
-      const { keyName, permissions, description, expiresAt, rateLimitPerHour, rateLimitPerMinute } = req.body;
-
-      if (!keyName || !permissions || !Array.isArray(permissions)) {
-        res.status(400).json({
-          error: 'Invalid request',
-          message: 'keyName and permissions array are required',
-          example: {
-            keyName: 'my_plugin_key',
-            permissions: ['player:read', 'zone:read'],
-            description: 'Optional description',
-            rateLimitPerMinute: 60
-          }
-        });
-        return;
-      }
-
-      const validPermissions = [
-        'player:read', 'player:write', 'player:*',
-        'zone:read', 'zone:write', 'zone:*',
-        'chunk:read', 'stats:read',
-        'admin:*', 'api:read', '*'
-      ];
-
-      const invalidPermissions = permissions.filter((p: string) => !validPermissions.includes(p));
-      if (invalidPermissions.length > 0) {
-        res.status(400).json({
-          error: 'Invalid permissions',
-          message: `Invalid permissions: ${invalidPermissions.join(', ')}`,
-          validPermissions
-        });
-        return;
-      }
-
-      const apiKey = await this.apiKeyService.createApiKey(
-        keyName,
-        permissions,
-        description,
-        expiresAt ? new Date(expiresAt) : undefined,
-        rateLimitPerHour || 1000,
-        rateLimitPerMinute || 60
-      );
-
-      res.status(201).json({
-        message: 'API key created successfully',
-        data: {
-          keyName,
-          apiKey,
-          permissions,
-          description,
-          rateLimitPerMinute: rateLimitPerMinute || 60,
-          rateLimitPerHour: rateLimitPerHour || 1000,
-          expiresAt
-        },
-        warning: 'This API key will only be shown once. Please save it securely.',
-        usage: {
-          websocket: `ws://localhost:3000/ws/zones?api_key=${apiKey}`,
-          restApi: 'Include in Authorization: Bearer <key> or X-API-Key: <key>',
-          minecraftPlugin: 'Use for /api/player/userlog and position updates'
-        }
-      });
-
-    } catch (error) {
-      logger.error('Failed to create API key', { 
-        error: error instanceof Error ? error.message : 'Unknown error' 
-      });
-      res.status(500).json({
-        error: 'Server error',
-        message: 'Unable to create API key'
-      });
-    }
-  }
-
-  private async revokeApiKey(req: express.Request, res: express.Response): Promise<void> {
-    try {
-      const { keyName } = req.params;
-      
-      if (!keyName) {
-        res.status(400).json({
-          error: 'Invalid request',
-          message: 'keyName parameter is required'
-        });
-        return;
-      }
-
-      const revoked = await this.apiKeyService.revokeApiKey(keyName);
-
-      if (revoked) {
-        res.json({
-          message: 'API key revoked successfully',
-          keyName,
-          timestamp: new Date().toISOString()
-        });
-      } else {
-        res.status(404).json({
-          error: 'API key not found',
-          message: `No active API key found with name: ${keyName}`
-        });
-      }
-
-    } catch (error) {
-      logger.error('Failed to revoke API key', { 
-        error: error instanceof Error ? error.message : 'Unknown error' 
-      });
-      res.status(500).json({
-        error: 'Server error',
-        message: 'Unable to revoke API key'
-      });
-    }
-  }
-
-  private async getApiKeyStats(req: express.Request, res: express.Response): Promise<void> {
-    try {
-      const { keyName } = req.query;
-      const stats = await this.apiKeyService.getUsageStats(keyName as string);
-
-      res.json({
-        message: 'API key statistics',
-        timestamp: new Date().toISOString(),
-        data: stats
-      });
-
-    } catch (error) {
-      logger.error('Failed to get API key stats', { 
-        error: error instanceof Error ? error.message : 'Unknown error' 
-      });
-      res.status(500).json({
-        error: 'Server error',
-        message: 'Unable to get API key statistics'
-      });
-    }
-  }
-
-  private async listApiKeys(req: express.Request, res: express.Response): Promise<void> {
-    try {
-      const keys = await this.apiKeyService.getUsageStats();
-
-      const safeKeys = keys.map((key: any) => ({
-        keyName: key.key_name,
-        permissions: key.permissions,
-        usageCount: key.usage_count,
-        lastUsedAt: key.last_used_at,
-        createdAt: key.created_at,
-        recentRequests: key.recent_requests,
-        isActive: key.is_active
-      }));
-
-      res.json({
-        message: 'API keys list',
-        count: safeKeys.length,
-        data: safeKeys
-      });
-
-    } catch (error) {
-      logger.error('Failed to list API keys', { 
-        error: error instanceof Error ? error.message : 'Unknown error' 
-      });
-      res.status(500).json({
-        error: 'Server error',
-        message: 'Unable to list API keys'
-      });
-    }
-  }
-
-  // ========== SYNC & MONITORING ENDPOINTS ==========
-  
-  private async getSyncStatus(req: express.Request, res: express.Response): Promise<void> {
-    try {
-      const syncStats = this.optimizedSyncService.getStats();
-      const redisStats = await this.redisService.getStats();
-      const wsStats = this.wsServer?.getStats() || null;
-      
-      res.json({
-        message: 'Synchronization status',
-        timestamp: new Date().toISOString(),
-        sync: syncStats,
-        redis: redisStats,
-        websocket: wsStats,
-        health: {
-          syncReady: syncStats.isReady,
-          pendingItems: syncStats.pendingItems,
-         errorRate: syncStats.errors / (syncStats.processedItems || 1),
-         avgProcessingTime: syncStats.performance.avgProcessingTime
-       }
-     });
-   } catch (error) {
-     res.status(500).json({
-       error: 'Failed to get sync status',
-       message: error instanceof Error ? error.message : 'Unknown error'
-     });
-   }
- }
-
- private async forceSync(req: express.Request, res: express.Response): Promise<void> {
-   try {
-     const authHeader = req.headers.authorization;
-     if (!authHeader || !this.isValidAdminToken(authHeader)) {
-       res.status(401).json({ 
-         error: 'Unauthorized',
-         message: 'Admin token required for force sync'
-       });
-       return;
-     }
-
-     if (!this.optimizedSyncService.isReady()) {
-       res.status(503).json({
-         error: 'Service unavailable',
-         message: 'Sync service is not ready'
-       });
-       return;
-     }
-
-     // Start sync in background
-     this.optimizedSyncService.forceFullSync().catch(error => {
-       logger.error('Force sync error', { 
-         error: error instanceof Error ? error.message : 'Unknown error' 
-       });
-     });
-     
-     res.json({
-       message: 'Force sync initiated',
-       timestamp: new Date().toISOString(),
-       note: 'Sync is running in background. Check /api/sync/status for progress.'
-     });
-     
-   } catch (error) {
-     logger.error('Failed to force sync', { 
-       error: error instanceof Error ? error.message : 'Unknown error' 
-     });
-     res.status(500).json({ 
-       error: 'Server error',
-       message: 'Unable to start force sync'
-     });
-   }
- }
-
- private async getStats(req: express.Request, res: express.Response): Promise<void> {
-   try {
-     const [syncStats, redisStats, dbStats] = await Promise.all([
-       this.optimizedSyncService.getStats(),
-       this.redisService.getStats(),
-       this.dbService.getZoneStats()
-     ]);
-     
-     res.json({
-       message: 'System statistics',
-       timestamp: new Date().toISOString(),
-       uptime: Math.floor((Date.now() - this.startupTime) / 1000),
-       sync: syncStats,
-       redis: redisStats,
-       database: dbStats,
-       websocket: this.wsServer?.getStats() || null
-     });
-     
-   } catch (error) {
-     logger.error('Failed to get statistics', { 
-       error: error instanceof Error ? error.message : 'Unknown error' 
-     });
-     res.status(500).json({ 
-       error: 'Server error',
-       message: 'Unable to get statistics'
-     });
-   }
- }
-
- private async getSystemInfo(req: express.Request, res: express.Response): Promise<void> {
-   try {
-     const [dbStats, redisHealth] = await Promise.all([
-       DatabaseConfig.getPoolStats(),
-       this.redisService.isHealthy()
-     ]);
-
-     const apiKey = (req as any).apiKey;
-
-     res.json({
-       system: {
-         nodeVersion: process.version,
-         platform: process.platform,
-         arch: process.arch,
-         uptime: process.uptime(),
-         memory: process.memoryUsage(),
-         startupTime: new Date(this.startupTime).toISOString()
-       },
-       database: {
-         ...dbStats,
-         connectionTest: await DatabaseConfig.testConnection()
-       },
-       redis: {
-         health: redisHealth,
-         stats: await this.redisService.getStats()
-       },
-       sync: {
-         isReady: this.optimizedSyncService.isReady(),
-         stats: this.optimizedSyncService.getStats()
-       },
-       websocket: {
-         connected: this.wsServer?.getConnectedClientsCount() || 0,
-         clients: this.wsServer?.getConnectedClients() || [],
-         stats: this.wsServer?.getStats() || null
-       },
-       authentication: {
-         currentKey: apiKey?.keyName,
-         permissions: apiKey?.permissions,
-         usageCount: apiKey?.usageCount
-       },
-       features: [
-         'Optimized bidirectional sync',
-         'Real-time WebSocket events',
-         'Smart chunk calculation',
-         'Redis keyspace notifications',
-         'Priority queue processing'
-       ]
-     });
-   } catch (error) {
-     logger.error('Failed to get system info', { 
-       error: error instanceof Error ? error.message : 'Unknown error' 
-     });
-     res.status(500).json({
-       error: 'Failed to get system information',
-       message: error instanceof Error ? error.message : 'Unknown error'
-     });
-   }
- }
-
- // ========== VALIDATION MIDDLEWARES ==========
+ private app: express.Application;
+ private server: any;
  
- private validateChunkParams(req: express.Request, res: express.Response, next: express.NextFunction): void {
-   const { chunkX, chunkZ } = req.params;
-   
-   const x = parseInt(chunkX);
-   const z = parseInt(chunkZ);
-   
-   if (!SecurityUtils.isValidChunkCoordinate(x) || !SecurityUtils.isValidChunkCoordinate(z)) {
-     res.status(400).json({
-       error: 'Invalid chunk coordinates',
-       message: 'chunkX and chunkZ must be valid integers within bounds',
-       received: { chunkX, chunkZ },
-       limits: {
-         min: process.env.CHUNK_MIN || -2000,
-         max: process.env.CHUNK_MAX || 2000
-       }
-     });
-     return;
-   }
-   
-   next();
- }
-
- private validateZoneParams(req: express.Request, res: express.Response, next: express.NextFunction): void {
-   const { zoneType, zoneId } = req.params;
-   
-   if (!['region', 'node', 'city'].includes(zoneType)) {
-     res.status(400).json({
-       error: 'Invalid zone type',
-       message: 'Type must be: region, node, or city',
-       received: zoneType,
-       allowed: ['region', 'node', 'city']
-     });
-     return;
-   }
-   
-   const id = parseInt(zoneId);
-   if (isNaN(id) || id <= 0) {
-     res.status(400).json({
-       error: 'Invalid zone ID',
-       message: 'ID must be a positive integer',
-       received: zoneId
-     });
-     return;
-   }
-   
-   next();
- }
-
- private validateUUIDParam(req: express.Request, res: express.Response, next: express.NextFunction): void {
-   const { uuid } = req.params;
-   
-   if (!SecurityUtils.isValidUUID(uuid)) {
-     res.status(400).json({
-       error: 'Invalid UUID',
-       message: 'UUID must be in valid format (server_uuid from your Minecraft server)',
-       received: uuid,
-       note: 'This should be the server_uuid, not the Mojang player_uuid'
-     });
-     return;
-   }
-   
-   next();
- }
-
- private validatePositionBody(req: express.Request, res: express.Response, next: express.NextFunction): void {
-   const { name, x, y, z } = req.body;
-   
-   if (!name || typeof name !== 'string' || name.length === 0 || name.length > 16) {
-     res.status(400).json({
-       error: 'Invalid name',
-       message: 'Name must be a string with 1 to 16 characters',
-       received: { name, type: typeof name, length: name?.length }
-     });
-     return;
-   }
-   
-   if (!SecurityUtils.isValidCoordinate(x) || !SecurityUtils.isValidCoordinate(y) || !SecurityUtils.isValidCoordinate(z)) {
-     res.status(400).json({
-       error: 'Invalid coordinates',
-       message: 'x, y, z must be valid finite numbers within bounds',
-       received: { x, y, z }
-     });
-     return;
-   }
-   
-   next();
- }
-
- private validateChunkBody(req: express.Request, res: express.Response, next: express.NextFunction): void {
-   const { chunkX, chunkZ } = req.body;
-   
-   if (!SecurityUtils.isValidChunkCoordinate(chunkX) || !SecurityUtils.isValidChunkCoordinate(chunkZ)) {
-     res.status(400).json({
-       error: 'Invalid chunk coordinates',
-       message: 'chunkX and chunkZ must be valid integers within bounds',
-       received: { chunkX, chunkZ }
-     });
-     return;
-   }
-   
-   next();
- }
-
- // ========== UTILITIES ==========
+ // Core Services
+ private dbService!: DatabaseService;
+ private redisService!: RedisService;
+ private zoneLoaderService!: ZoneLoaderService;
+ private zoneTransitionService!: ZoneTransitionService;
+ private batchSyncService!: BatchSyncService;
+ private apiKeyService!: ApiKeyService;
+ private calculatorService!: ChunkCalculatorService;
  
- private isValidAdminToken(authHeader: string): boolean {
-   const token = authHeader.replace('Bearer ', '');
-   const validToken = process.env.ADMIN_TOKEN;
-   
-   if (!validToken) {
-     logger.warn('No ADMIN_TOKEN configured');
-     return false;
+ // Controllers
+ private playerController!: PlayerController;
+ private zoneController!: ZoneController;
+ 
+ // WebSocket
+ private wsServer!: FixedZoneWebSocketServer;
+
+ private isShuttingDown = false;
+ private startupTime = Date.now();
+
+ constructor() {
+   this.app = express();
+   this.setupMiddleware();
+   this.setupRoutes();
+   this.setupErrorHandling();
+ }
+
+ // ========== INITIALIZATION ==========
+ 
+ async start(): Promise<void> {
+   try {
+     const port = process.env.PORT || 3000;
+     
+     logger.info('🚀 Starting Minecraft Zones Backend v2.0 - FULLY OPTIMIZED');
+     
+     // 1. Validate environment
+     this.validateEnvironment();
+     
+     // 2. Initialize core services
+     await this.initializeServices();
+     
+     // 3. Initialize controllers
+     this.initializeControllers();
+     
+     // 4. Load zones into Redis cache
+     await this.initializeZoneCache();
+     
+     // 5. Create HTTP server + WebSocket
+     this.server = createServer(this.app);
+     this.wsServer = new FixedZoneWebSocketServer(this.server, this.apiKeyService);
+     
+     // 6. Start zone transition service (Redis keyspace → WebSocket)
+     await this.zoneTransitionService.start();
+     
+     // 7. Start batch sync service (Redis → PostgreSQL)
+     await this.batchSyncService.start();
+     
+     // 8. Start HTTP server
+     await new Promise<void>((resolve, reject) => {
+       this.server.listen(port, (err?: Error) => {
+         err ? reject(err) : resolve();
+       });
+     });
+     
+     logger.info('🎉 APPLICATION STARTED SUCCESSFULLY!', { port });
+     
+     await this.logSystemStatus();
+     
+     this.setupGracefulShutdown();
+     
+   } catch (error) {
+     logger.error('❌ Failed to start application', { error });
+     await this.cleanup();
+     process.exit(1);
    }
-   
-   return SecurityUtils.timingSafeEqual(token, validToken);
+ }
+
+ private async initializeServices(): Promise<void> {
+   try {
+     logger.info('🔧 Initializing core services...');
+     
+     // Database Service
+     this.dbService = new DatabaseService();
+     const dbConnected = await DatabaseConfig.testConnection();
+     if (!dbConnected) throw new Error('Database connection failed');
+     logger.info('✅ Database service ready');
+     
+     // Redis Service
+     this.redisService = new RedisService();
+     await this.redisService.init();
+     logger.info('✅ Redis service ready with keyspace notifications');
+     
+     // Calculator Service
+     this.calculatorService = new ChunkCalculatorService();
+     logger.info('✅ Chunk Calculator service ready');
+     
+     // Zone Loader Service
+     this.zoneLoaderService = new ZoneLoaderService(
+       this.dbService,
+       this.redisService,
+       this.calculatorService
+     );
+     logger.info('✅ Zone Loader service ready');
+     
+     // API Key Service
+     this.apiKeyService = new ApiKeyService();
+     logger.info('✅ API Key service ready');
+     
+     // Zone Transition Service (Redis keyspace → WebSocket)
+     this.zoneTransitionService = new ZoneTransitionService(
+       this.redisService,
+       (transition) => {
+         // Callback: broadcast to WebSocket
+         if (this.wsServer) {
+           this.wsServer.broadcastZoneEvent(transition);
+         }
+       }
+     );
+     logger.info('✅ Zone Transition service ready');
+     
+     // Batch Sync Service (Redis → PostgreSQL)
+     this.batchSyncService = new BatchSyncService(
+       this.redisService,
+       this.dbService
+     );
+     logger.info('✅ Batch Sync service ready');
+     
+   } catch (error) {
+     logger.error('❌ Service initialization failed', { error });
+     throw error;
+   }
+ }
+
+ private initializeControllers(): void {
+   this.playerController = new PlayerController(this.redisService, this.dbService);
+   this.zoneController = new ZoneController(this.redisService, this.dbService);
+   logger.info('✅ Controllers initialized');
+ }
+
+ private async initializeZoneCache(): Promise<void> {
+   try {
+     logger.info('🗺️ Initializing zone cache...');
+     
+     // Load all zones from PostgreSQL into Redis
+     await this.zoneLoaderService.loadAllZonesToRedis();
+     
+     // Get cache statistics
+     const cacheStats = await this.zoneLoaderService.getCacheStats();
+     
+     logger.info('✅ Zone cache initialized', {
+       totalChunks: cacheStats.totalCachedChunks,
+       regions: cacheStats.regionsCount,
+       nodes: cacheStats.nodesCount,
+       cities: cacheStats.citiesCount
+     });
+     
+   } catch (error) {
+     logger.error('❌ Failed to initialize zone cache', { error });
+     throw error;
+   }
  }
 
  private validateEnvironment(): void {
@@ -966,12 +206,834 @@ class Application {
    
    if (missingRecommended.length > 0) {
      logger.warn('⚠️ Missing recommended environment variables', { 
-       missing: missingRecommended,
-       suggestion: 'Set these for enhanced security and functionality'
+       missing: missingRecommended 
      });
    }
    
-   logger.info('✅ Environment variables validated');
+   logger.info('✅ Environment validated');
+ }
+
+ private async logSystemStatus(): Promise<void> {
+   try {
+     const [redisStats, batchStats, cacheStats] = await Promise.all([
+       this.redisService.getStats(),
+       this.batchSyncService.getStats(),
+       this.zoneLoaderService.getCacheStats()
+     ]);
+
+     logger.info('🔥 SYSTEM STATUS - ALL SERVICES OPERATIONAL', {
+       architecture: 'Jedis → Redis Keyspace → Zone Transitions → WebSocket + Batch Sync',
+       services: {
+         database: '✅ PostgreSQL connected with pooling',
+         redis: '✅ Connected with KEh keyspace notifications',
+         zoneCache: `✅ ${cacheStats.totalCachedChunks} chunks cached`,
+         transitions: '✅ Real-time zone detection active',
+         batchSync: `✅ Redis → PostgreSQL every ${process.env.BATCH_SYNC_INTERVAL || 30000}ms`,
+         websocket: '✅ Real-time broadcasting ready',
+         authentication: '✅ API key validation active'
+       }
+     });
+
+     logger.info('📡 INTEGRATION FLOW', {
+       step1: 'Plugin Minecraft (Jedis) → HSET player:chunk:uuid',
+       step2: 'Redis Keyspace Notification → __keyspace@0__:player:chunk:*',
+       step3: 'ZoneTransitionService → Compare previous/current zones',
+       step4: 'WebSocket → Broadcast zone_event to clients',
+       step5: 'BatchSyncService → Periodic Redis → PostgreSQL sync'
+     });
+
+     logger.info('🎯 ENDPOINTS READY', {
+       health: '/api/health',
+       websocketTest: '/api/websocket/test',
+       playerLog: 'POST /api/player/userlog',
+       chunkLookup: 'GET /api/chunk/:x/:z',
+       websocketEndpoint: 'ws://localhost:3000/ws/zones?api_key=xxx',
+       adminZones: 'POST /api/admin/zones/reload'
+     });
+
+   } catch (error) {
+     logger.error('❌ Failed to log system status', { error });
+   }
+ }
+
+ // ========== MIDDLEWARE ==========
+ 
+ private setupMiddleware(): void {
+   // Graceful shutdown check
+   this.app.use((req, res, next) => {
+     if (this.isShuttingDown) {
+       res.status(503).json({ 
+         error: 'Service unavailable - shutting down',
+         timestamp: new Date().toISOString()
+       });
+       return;
+     }
+     next();
+   });
+
+   // Security headers
+   this.app.use(helmet({
+     contentSecurityPolicy: false,
+     crossOriginEmbedderPolicy: false
+   }));
+   
+   // CORS configuration
+   this.app.use(cors({
+     origin: process.env.CORS_ORIGIN || '*',
+     credentials: true,
+     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+     allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key']
+   }));
+   
+   // Body parsing
+   this.app.use(express.json({ 
+     limit: '1mb',
+     strict: true,
+     type: 'application/json'
+   }));
+   this.app.use(express.urlencoded({ 
+     extended: true,
+     limit: '1mb'
+   }));
+   
+   // Request logging
+   this.app.use((req, res, next) => {
+     const start = Date.now();
+     
+     res.on('finish', () => {
+       const duration = Date.now() - start;
+       const apiKey = (req as any).apiKey;
+       
+       logger.info('HTTP Request', {
+         method: req.method,
+         path: req.path,
+         statusCode: res.statusCode,
+         durationMs: duration,
+         ip: req.ip,
+         apiKeyName: apiKey?.keyName || 'anonymous'
+       });
+     });
+     
+     next();
+   });
+
+   // API Key authentication for protected routes
+   this.app.use('/api', this.authenticateApiKey.bind(this));
+ }
+
+ private async authenticateApiKey(req: express.Request, res: express.Response, next: express.NextFunction): Promise<void> {
+   const publicEndpoints = [
+     '/api/',
+     '/api/health',
+     '/api/websocket/test'
+   ];
+
+   if (publicEndpoints.some(endpoint => req.path === endpoint)) {
+     next();
+     return;
+   }
+
+   const authHeader = req.headers.authorization;
+   const apiKeyHeader = req.headers['x-api-key'] as string;
+   
+   let apiKey: string | null = null;
+
+   if (authHeader && authHeader.startsWith('Bearer ')) {
+     apiKey = authHeader.replace('Bearer ', '');
+   } else if (apiKeyHeader) {
+     apiKey = apiKeyHeader;
+   }
+
+   if (!apiKey) {
+     res.status(401).json({
+       error: 'Authentication required',
+       message: 'API key required: Authorization: Bearer <key> or X-API-Key: <key>',
+       endpoints: {
+         public: publicEndpoints,
+         createApiKey: 'POST /api/admin/api-keys'
+       }
+     });
+     return;
+   }
+
+   try {
+     const validatedKey = await this.apiKeyService.validateApiKey(apiKey);
+     
+     if (!validatedKey) {
+       res.status(401).json({
+         error: 'Invalid API key',
+         message: 'The provided API key is invalid, expired, or inactive'
+       });
+       return;
+     }
+
+     const requiredPermission = this.getRequiredPermission(req.method, req.path);
+     
+     if (!this.apiKeyService.hasPermission(validatedKey, requiredPermission)) {
+       res.status(403).json({
+         error: 'Insufficient permissions',
+         message: `This API key does not have permission: ${requiredPermission}`,
+         required: requiredPermission,
+         available: validatedKey.permissions
+       });
+       return;
+     }
+
+     // Rate limiting check
+     const rateLimitOk = await this.apiKeyService.checkRateLimit(
+       validatedKey.id, 
+       req.path, 
+       validatedKey.rateLimitPerMinute
+     );
+
+     if (!rateLimitOk) {
+       res.status(429).json({
+         error: 'Rate limit exceeded',
+         message: `Too many requests. Limit: ${validatedKey.rateLimitPerMinute} requests per minute`,
+         retryAfter: 60
+       });
+       return;
+     }
+
+     // Record usage asynchronously
+     this.apiKeyService.recordUsage(validatedKey.id, req.path).catch(error => {
+       logger.error('Failed to record API usage', { 
+         keyId: validatedKey.id, 
+         endpoint: req.path, 
+         error 
+       });
+     });
+
+     (req as any).apiKey = validatedKey;
+     next();
+   } catch (error) {
+     logger.error('Authentication error', { error });
+     res.status(500).json({
+       error: 'Authentication error',
+       message: 'Unable to validate API key'
+     });
+   }
+ }
+
+ private getRequiredPermission(method: string, path: string): string {
+   // Admin routes
+   if (path.startsWith('/api/admin/')) {
+     return 'admin:*';
+   }
+
+   // Zone routes
+   if (path.includes('/api/zone/') && method === 'POST') {
+     return 'zone:write';
+   }
+   if (path.includes('/api/zone/') || path.includes('/api/chunk/')) {
+     return 'zone:read';
+   }
+
+   // Player routes
+   if (path.includes('/api/player/') && (method === 'POST' || method === 'PUT')) {
+     return 'player:write';
+   }
+   if (path.includes('/api/player/')) {
+     return 'player:read';
+   }
+
+   // Sync routes
+   if (path.includes('/api/sync/')) {
+     return 'stats:read';
+   }
+
+   // Default
+   return 'api:read';
+ }
+
+ // ========== ROUTES ==========
+ 
+ private setupRoutes(): void {
+   // ========== PUBLIC ROUTES ==========
+   
+   this.app.get('/', (req, res) => {
+     const uptime = Date.now() - this.startupTime;
+     
+     res.json({
+       name: 'Minecraft Zones Backend',
+       version: '2.0.0-FULLY-OPTIMIZED',
+       status: 'running',
+       environment: process.env.NODE_ENV || 'development',
+       uptime: Math.floor(uptime / 1000),
+       architecture: {
+         flow: 'Jedis → Redis Keyspace → Zone Transitions → WebSocket + Batch Sync',
+         features: [
+           '✅ Real-time zone transition detection (<1ms)',
+           '✅ WebSocket broadcasting with compression',
+           '✅ Redis chunk zone cache (instant lookup)',
+           '✅ Batch sync Redis → PostgreSQL',
+           '✅ API key authentication & rate limiting',
+           '✅ Keyspace notifications (KEh configuration)'
+         ]
+       },
+       services: {
+         zoneTransitions: this.zoneTransitionService?.isRunning() || false,
+         batchSync: this.batchSyncService?.getStats().isRunning || false,
+         websocket: this.wsServer?.getConnectedClientsCount() || 0,
+         redis: 'Active with keyspace notifications'
+       },
+       endpoints: {
+         websocket: 'ws://localhost:3000/ws/zones?api_key=xxx',
+         health: '/api/health',
+         testing: '/api/websocket/test',
+         player: '/api/player/userlog (for Minecraft plugin)',
+         chunks: '/api/chunk/:x/:z'
+       }
+     });
+   });
+
+   this.app.get('/api/health', async (req, res) => {
+     try {
+       const [redisStats, batchStats, cacheStats, dbTest] = await Promise.all([
+         this.redisService.getStats(),
+         this.batchSyncService.getStats(),
+         this.zoneLoaderService.getCacheStats(),
+         DatabaseConfig.testConnection()
+       ]);
+
+       const isHealthy = redisStats.connectedClients && dbTest && this.zoneTransitionService.isRunning();
+
+       res.status(isHealthy ? 200 : 503).json({
+         status: isHealthy ? 'healthy' : 'unhealthy',
+         timestamp: new Date().toISOString(),
+         uptime: Math.floor((Date.now() - this.startupTime) / 1000),
+         services: {
+           database: dbTest,
+           redis: redisStats,
+           zoneCache: cacheStats,
+           batchSync: batchStats,
+           zoneTransitions: this.zoneTransitionService.isRunning(),
+           websocket: this.wsServer?.getConnectedClientsCount() || 0
+         },
+         integration: {
+           jedisToRedis: 'Plugin writes via Jedis HSET',
+           redisToTransitions: 'Keyspace notifications active',
+           transitionsToWebSocket: 'Real-time broadcasting',
+           redisToDB: `Batch sync every ${batchStats.nextSyncIn}ms`
+         }
+       });
+     } catch (error) {
+       res.status(500).json({
+         status: 'error',
+         error: 'Health check failed',
+         timestamp: new Date().toISOString()
+       });
+     }
+   });
+
+   this.app.get('/api/websocket/test', (req, res) => {
+     const connectedClients = this.wsServer?.getConnectedClientsCount() || 0;
+     
+     res.json({
+       websocket: {
+         status: 'active',
+         endpoint: `ws://${req.get('host')}/ws/zones`,
+         connectedClients,
+         authentication: {
+           required: true,
+           methods: ['?api_key=xxx', 'Authorization: Bearer xxx'],
+           permissions: 'zone:read permission required'
+         },
+         realTimeEvents: {
+           type: 'zone_event',
+           actions: ['enter', 'leave'],
+           zoneTypes: ['region', 'node', 'city'],
+           format: {
+             playerUuid: 'string',
+             action: 'enter|leave',
+             zoneType: 'region|node|city',
+             zoneId: 'number',
+             zoneName: 'string',
+             timestamp: 'number'
+           }
+         },
+         testingGuide: {
+           step1: 'Create API key: POST /api/admin/api-keys',
+           step2: 'Connect: ws://localhost:3000/ws/zones?api_key=xxx',
+           step3: 'Move player between zones in Minecraft',
+           step4: 'Observe real-time zone_event messages',
+           troubleshooting: {
+             noEvents: 'Player must cross chunk boundaries between different zones',
+             authFailed: 'Verify API key has zone:read permission',
+             noConnection: 'Check API key format and WebSocket URL'
+           }
+         }
+       }
+     });
+   });
+
+   // ========== API KEY MANAGEMENT ==========
+   
+   this.app.post('/api/admin/api-keys', this.createApiKey.bind(this));
+   this.app.get('/api/admin/api-keys', this.listApiKeys.bind(this));
+   this.app.delete('/api/admin/api-keys/:keyName', this.revokeApiKey.bind(this));
+   this.app.get('/api/admin/api-keys/stats', this.getApiKeyStats.bind(this));
+
+   // ========== PLAYER ENDPOINTS ==========
+   
+   this.app.post('/api/player/userlog', 
+     this.playerController.handleUserLog.bind(this.playerController)
+   );
+
+   this.app.get('/api/player/:uuid', 
+     this.validateUUID.bind(this),
+     this.playerController.getPlayerInfo.bind(this.playerController)
+   );
+   
+   this.app.post('/api/player/:uuid/position', 
+     this.validateUUID.bind(this),
+     this.validatePosition.bind(this),
+     this.playerController.updatePlayerPosition.bind(this.playerController)
+   );
+
+   // ========== ZONE ENDPOINTS ==========
+   
+   this.app.get('/api/chunk/:chunkX/:chunkZ', 
+     this.validateChunkCoords.bind(this),
+     this.playerController.getChunkInfo.bind(this.playerController)
+   );
+
+   this.app.get('/api/zones/hierarchy', 
+     this.zoneController.getZoneHierarchy.bind(this.zoneController)
+   );
+
+   this.app.get('/api/zone/:zoneType/:zoneId',
+     this.validateZoneParams.bind(this),
+     this.zoneController.getZoneById.bind(this.zoneController)
+   );
+
+   // ========== ADMIN ENDPOINTS ==========
+   
+   this.app.get('/api/admin/sync/status', this.getSyncStatus.bind(this));
+   this.app.post('/api/admin/sync/force', this.forceSync.bind(this));
+   
+   // Zone cache management
+   this.app.post('/api/admin/zones/reload', this.reloadZones.bind(this));
+   this.app.get('/api/admin/zones/cache-stats', this.getZoneCacheStats.bind(this));
+   this.app.post('/api/admin/zones/:zoneType/:zoneId/reload', this.reloadSpecificZone.bind(this));
+
+   // System information
+   this.app.get('/api/admin/system', this.getSystemInfo.bind(this));
+
+   // ========== 404 HANDLER ==========
+   this.app.use('*', (req, res) => {
+     res.status(404).json({
+       error: 'Endpoint not found',
+       message: `${req.method} ${req.originalUrl} does not exist`,
+       timestamp: new Date().toISOString(),
+       availableEndpoints: {
+         public: [
+           'GET /',
+           'GET /api/health', 
+           'GET /api/websocket/test'
+         ],
+         player: [
+           'POST /api/player/userlog',
+           'GET /api/player/:uuid',
+           'POST /api/player/:uuid/position'
+         ],
+         zones: [
+           'GET /api/chunk/:x/:z',
+           'GET /api/zones/hierarchy',
+           'GET /api/zone/:type/:id'
+         ],
+         admin: [
+           'POST /api/admin/api-keys',
+           'GET /api/admin/sync/status',
+           'POST /api/admin/zones/reload'
+         ],
+         websocket: 'ws://localhost:3000/ws/zones?api_key=xxx'
+       }
+     });
+   });
+ }
+
+ // ========== VALIDATION MIDDLEWARES ==========
+ 
+ private validateUUID(req: express.Request, res: express.Response, next: express.NextFunction): void {
+   if (!SecurityUtils.isValidUUID(req.params.uuid)) {
+     res.status(400).json({ 
+       error: 'Invalid UUID format',
+       message: 'UUID must be in valid format (server_uuid from Minecraft server)'
+     });
+     return;
+   }
+   next();
+ }
+
+ private validatePosition(req: express.Request, res: express.Response, next: express.NextFunction): void {
+   const { name, x, y, z } = req.body;
+   
+   if (!SecurityUtils.isValidPlayerName(name) ||
+       !SecurityUtils.isValidCoordinate(x) ||
+       !SecurityUtils.isValidCoordinate(y) ||
+       !SecurityUtils.isValidCoordinate(z)) {
+     res.status(400).json({ 
+       error: 'Invalid parameters',
+       message: 'Valid name (3-16 chars) and coordinates required'
+     });
+     return;
+   }
+   next();
+ }
+
+ private validateChunkCoords(req: express.Request, res: express.Response, next: express.NextFunction): void {
+   const x = parseInt(req.params.chunkX);
+   const z = parseInt(req.params.chunkZ);
+   
+   if (!SecurityUtils.isValidChunkCoordinate(x) || !SecurityUtils.isValidChunkCoordinate(z)) {
+     res.status(400).json({ 
+       error: 'Invalid chunk coordinates',
+       message: 'Chunk coordinates must be valid integers within bounds'
+     });
+     return;
+   }
+   next();
+ }
+
+ private validateZoneParams(req: express.Request, res: express.Response, next: express.NextFunction): void {
+   const { zoneType, zoneId } = req.params;
+   
+   if (!['region', 'node', 'city'].includes(zoneType)) {
+     res.status(400).json({
+       error: 'Invalid zone type',
+       message: 'Type must be: region, node, or city'
+     });
+     return;
+   }
+   
+   const id = parseInt(zoneId);
+   if (isNaN(id) || id <= 0) {
+     res.status(400).json({
+       error: 'Invalid zone ID', 
+       message: 'ID must be a positive integer'
+     });
+     return;
+   }
+   
+   next();
+ }
+
+ // ========== API KEY MANAGEMENT ENDPOINTS ==========
+ 
+ private async createApiKey(req: express.Request, res: express.Response): Promise<void> {
+   try {
+     const { keyName, permissions, description, rateLimitPerMinute } = req.body;
+
+     if (!keyName || !Array.isArray(permissions)) {
+       res.status(400).json({
+         error: 'Invalid request',
+         message: 'keyName and permissions array are required',
+         example: {
+           keyName: 'minecraft_plugin',
+           permissions: ['player:write', 'zone:read'],
+           description: 'Main Minecraft plugin access',
+           rateLimitPerMinute: 120
+         },
+         validPermissions: [
+           'player:read', 'player:write', 'player:*',
+           'zone:read', 'zone:write', 'zone:*',
+           'chunk:read', 'stats:read', 'admin:*', '*'
+         ]
+       });
+       return;
+     }
+
+     const apiKey = await this.apiKeyService.createApiKey(
+       keyName,
+       permissions,
+       description,
+       undefined, // expiresAt
+       1000, // rateLimitPerHour
+       rateLimitPerMinute || 60
+     );
+
+     res.status(201).json({
+       message: 'API key created successfully',
+       data: {
+         keyName,
+         apiKey,
+         permissions,
+         description,
+         rateLimitPerMinute: rateLimitPerMinute || 60
+       },
+       warning: 'This API key will only be shown once. Save it securely!',
+       usage: {
+         websocket: `ws://localhost:3000/ws/zones?api_key=${apiKey}`,
+         restApi: `Authorization: Bearer ${apiKey}`,
+         minecraftPlugin: 'Use for /api/player/userlog and position updates'
+       }
+     });
+
+   } catch (error) {
+     logger.error('Failed to create API key', { error });
+     res.status(500).json({
+       error: 'Server error',
+       message: 'Unable to create API key'
+     });
+   }
+ }
+
+ private async listApiKeys(req: express.Request, res: express.Response): Promise<void> {
+   try {
+     const keys = await this.apiKeyService.getUsageStats();
+
+     const safeKeys = keys.map((key: any) => ({
+       keyName: key.key_name,
+       permissions: key.permissions,
+       usageCount: key.usage_count,
+       lastUsedAt: key.last_used_at,
+       createdAt: key.created_at,
+       recentRequests: key.recent_requests,
+       isActive: key.is_active,
+       rateLimitPerMinute: key.rate_limit_per_minute
+     }));
+
+     res.json({
+       message: 'API keys list',
+       count: safeKeys.length,
+       data: safeKeys
+     });
+
+   } catch (error) {
+     logger.error('Failed to list API keys', { error });
+     res.status(500).json({
+       error: 'Server error',
+       message: 'Unable to list API keys'
+     });
+   }
+ }
+
+ private async revokeApiKey(req: express.Request, res: express.Response): Promise<void> {
+   try {
+     const { keyName } = req.params;
+     
+     const revoked = await this.apiKeyService.revokeApiKey(keyName);
+
+     if (revoked) {
+       res.json({
+         message: 'API key revoked successfully',
+         keyName,
+         timestamp: new Date().toISOString()
+       });
+     } else {
+       res.status(404).json({
+         error: 'API key not found',
+         message: `No active API key found with name: ${keyName}`
+       });
+     }
+
+   } catch (error) {
+     logger.error('Failed to revoke API key', { error });
+     res.status(500).json({
+       error: 'Server error',
+       message: 'Unable to revoke API key'
+     });
+   }
+ }
+
+ private async getApiKeyStats(req: express.Request, res: express.Response): Promise<void> {
+   try {
+     const { keyName } = req.query;
+     const stats = await this.apiKeyService.getUsageStats(keyName as string);
+
+     res.json({
+       message: 'API key statistics',
+       timestamp: new Date().toISOString(),
+       data: stats
+     });
+
+   } catch (error) {
+     logger.error('Failed to get API key stats', { error });
+     res.status(500).json({
+       error: 'Server error',
+       message: 'Unable to get API key statistics'
+     });
+   }
+ }
+
+ // ========== SYNC & ADMIN ENDPOINTS ==========
+ 
+ private async getSyncStatus(req: express.Request, res: express.Response): Promise<void> {
+   try {
+     const [batchStats, redisStats, cacheStats] = await Promise.all([
+       this.batchSyncService.getStats(),
+       this.redisService.getStats(),
+       this.zoneLoaderService.getCacheStats()
+       ]);
+     
+     res.json({
+       message: 'Synchronization status',
+       timestamp: new Date().toISOString(),
+       services: {
+         batchSync: batchStats,
+         redis: redisStats,
+         zoneCache: cacheStats,
+         zoneTransitions: {
+           isRunning: this.zoneTransitionService.isRunning()
+         }
+       },
+       health: {
+         batchSyncReady: batchStats.isRunning,
+         redisConnected: redisStats.connectedClients,
+         cachedChunks: cacheStats.totalCachedChunks,
+         transitionsActive: this.zoneTransitionService.isRunning()
+       }
+     });
+   } catch (error) {
+     logger.error('Failed to get sync status', { error });
+     res.status(500).json({
+       error: 'Failed to get sync status'
+     });
+   }
+ }
+
+ private async forceSync(req: express.Request, res: express.Response): Promise<void> {
+   try {
+     const result = await this.batchSyncService.forceSync();
+     
+     res.json({
+       message: 'Force sync completed',
+       timestamp: new Date().toISOString(),
+       result
+     });
+   } catch (error) {
+     logger.error('Failed to force sync', { error });
+     res.status(500).json({
+       error: 'Force sync failed',
+       message: error instanceof Error ? error.message : 'Unknown error'
+     });
+   }
+ }
+
+ private async reloadZones(req: express.Request, res: express.Response): Promise<void> {
+   try {
+     logger.info('🔄 Manual zone cache reload requested');
+     
+     await this.zoneLoaderService.loadAllZonesToRedis();
+     const stats = await this.zoneLoaderService.getCacheStats();
+     
+     res.json({
+       message: 'Zone cache reloaded successfully',
+       timestamp: new Date().toISOString(),
+       stats
+     });
+     
+     logger.info('✅ Zone cache reloaded via API', { stats });
+     
+   } catch (error) {
+     logger.error('Failed to reload zones', { error });
+     res.status(500).json({
+       error: 'Failed to reload zones',
+       message: error instanceof Error ? error.message : 'Unknown error'
+     });
+   }
+ }
+
+ private async getZoneCacheStats(req: express.Request, res: express.Response): Promise<void> {
+   try {
+     const stats = await this.zoneLoaderService.getCacheStats();
+     
+     res.json({
+       message: 'Zone cache statistics',
+       timestamp: new Date().toISOString(),
+       data: stats
+     });
+   } catch (error) {
+     logger.error('Failed to get zone cache stats', { error });
+     res.status(500).json({
+       error: 'Failed to get cache statistics'
+     });
+   }
+ }
+
+ private async reloadSpecificZone(req: express.Request, res: express.Response): Promise<void> {
+   try {
+     const { zoneType, zoneId } = req.params;
+     const id = parseInt(zoneId);
+
+     await this.zoneLoaderService.reloadZone(zoneType as 'region' | 'node' | 'city', id);
+     
+     res.json({
+       message: `Zone ${zoneType}:${id} reloaded successfully`,
+       timestamp: new Date().toISOString()
+     });
+     
+   } catch (error) {
+     logger.error('Failed to reload specific zone', { 
+       zoneType: req.params.zoneType, 
+       zoneId: req.params.zoneId, 
+       error 
+     });
+     res.status(500).json({
+       error: 'Failed to reload zone',
+       message: error instanceof Error ? error.message : 'Unknown error'
+     });
+   }
+ }
+
+ private async getSystemInfo(req: express.Request, res: express.Response): Promise<void> {
+   try {
+     const [dbStats, redisStats, batchStats, cacheStats] = await Promise.all([
+       DatabaseConfig.getPoolStats(),
+       this.redisService.getStats(),
+       this.batchSyncService.getStats(),
+       this.zoneLoaderService.getCacheStats()
+     ]);
+
+     const apiKey = (req as any).apiKey;
+
+     res.json({
+       system: {
+         nodeVersion: process.version,
+         platform: process.platform,
+         arch: process.arch,
+         uptime: process.uptime(),
+         memory: process.memoryUsage(),
+         startupTime: new Date(this.startupTime).toISOString(),
+         environment: process.env.NODE_ENV || 'development'
+       },
+       database: {
+         ...dbStats,
+         connectionTest: await DatabaseConfig.testConnection()
+       },
+       redis: {
+         stats: redisStats,
+         keyspaceConfig: 'KEh (hash commands notifications enabled)'
+       },
+       services: {
+         batchSync: batchStats,
+         zoneCache: cacheStats,
+         zoneTransitions: {
+           isRunning: this.zoneTransitionService.isRunning()
+         },
+         websocket: {
+  connected: this.wsServer?.getConnectedClientsCount() || 0,
+  clients: this.wsServer?.getConnectedClients() || []
+}
+       },
+       authentication: {
+         currentKey: apiKey?.keyName,
+         permissions: apiKey?.permissions
+       },
+       architecture: {
+         flow: 'Jedis → Redis Keyspace → Zone Transitions → WebSocket',
+         realTimeDetection: 'Sub-second zone transition events',
+         batchSync: 'Periodic Redis → PostgreSQL persistence',
+         caching: 'Pre-calculated chunk → zone mappings in Redis'
+       }
+     });
+   } catch (error) {
+     logger.error('Failed to get system info', { error });
+     res.status(500).json({
+       error: 'Failed to get system information'
+     });
+   }
  }
 
  // ========== ERROR HANDLING ==========
@@ -989,7 +1051,6 @@ class Application {
        url: req.url,
        method: req.method,
        ip: req.ip,
-       userAgent: req.get('User-Agent'),
        apiKeyName: apiKey?.keyName || 'anonymous'
      });
      
@@ -1031,99 +1092,8 @@ class Application {
    });
  }
 
- // ========== APPLICATION LIFECYCLE ==========
+ // ========== GRACEFUL SHUTDOWN ==========
  
- async start(): Promise<void> {
-   try {
-     const port = process.env.PORT || 3000;
-     
-     logger.info('🚀 Starting Minecraft Zones Backend v2.0 - FULLY FIXED');
-     
-     // Validate environment
-     this.validateEnvironment();
-     
-     // Initialize Redis
-     await this.redisService.init();
-     logger.info('✅ Redis service initialized with all clients');
-     
-     // Test database connection
-     const dbConnected = await DatabaseConfig.testConnection();
-     if (!dbConnected) {
-       throw new Error('Unable to connect to PostgreSQL');
-     }
-     logger.info('✅ PostgreSQL connection verified');
-     
-     // Initialize optimized sync service
-     await this.optimizedSyncService.init();
-     logger.info('✅ OptimizedSyncService initialized and ready');
-     
-     // Create HTTP server
-     this.server = createServer(this.app);
-     
-     // Initialize WebSocket server
-     this.wsServer = new FixedZoneWebSocketServer(
-       this.server, 
-       this.redisService,
-       this.apiKeyService
-     );
-     logger.info('✅ FixedZoneWebSocketServer initialized');
-     
-     // Start HTTP server
-     await new Promise<void>((resolve, reject) => {
-       this.server.listen(port, (err?: Error) => {
-         if (err) {
-           reject(err);
-         } else {
-           resolve();
-         }
-       });
-     });
-     
-     logger.info('🎉 Minecraft Zones Backend v2.0 started successfully!', { 
-       port,
-       environment: process.env.NODE_ENV || 'development'
-     });
-     
-     logger.info('🔥 All Systems Operational:', { 
-       features: [
-         '✅ Bidirectional Redis ↔ PostgreSQL sync with intelligent queue',
-         '✅ WebSocket zone events broadcasting in real-time',
-         '✅ Optimized chunk calculation with batch processing',
-         '✅ Fixed keyspace notifications for position tracking',
-         '✅ Proper server_uuid/player_uuid handling throughout',
-         '✅ Compressed WebSocket with zone transition filtering',
-         '✅ Sub-5ms zone event latency end-to-end'
-       ]
-     });
-     
-     logger.info('📡 WebSocket Zone Events Ready:', { 
-       endpoint: `ws://localhost:${port}/ws/zones`,
-       authentication: 'API Key required (?api_key=xxx)',
-       status: 'FULLY OPERATIONAL',
-       testCommand: 'Move between zones in Minecraft to see events'
-     });
-     
-     logger.info('🔗 API Endpoints Available:', { 
-       health: `http://localhost:${port}/api/health`,
-       sync: `http://localhost:${port}/api/sync/status`,
-       websocketTest: `http://localhost:${port}/api/websocket/test`,
-       playerLog: 'POST /api/player/userlog (for Minecraft plugin)',
-       chunkLookup: 'GET /api/chunk/:x/:z'
-     });
-     
-     // Setup graceful shutdown
-     this.setupGracefulShutdown();
-     
-   } catch (error) {
-     logger.error('❌ Failed to start application', { 
-       error: error instanceof Error ? error.message : 'Unknown error',
-       stack: error instanceof Error ? error.stack : undefined
-     });
-     await this.cleanup();
-     process.exit(1);
-   }
- }
-
  private setupGracefulShutdown(): void {
    const signals = ['SIGTERM', 'SIGINT'];
    
@@ -1152,7 +1122,7 @@ class Application {
      
      // Wait for ongoing requests
      logger.info('⏳ Waiting for ongoing requests...');
-     await new Promise(resolve => setTimeout(resolve, 5000));
+     await new Promise(resolve => setTimeout(resolve, 3000));
      
      // Cleanup services
      await this.cleanup();
@@ -1175,24 +1145,19 @@ class Application {
    // Cleanup WebSocket server
    if (this.wsServer) {
      logger.info('🔌 Closing WebSocket server...');
-     cleanupPromises.push(
-       new Promise(resolve => {
-         this.wsServer!.close();
-         resolve();
-       })
-     );
+     cleanupPromises.push(this.wsServer.close());
    }
    
-   // Cleanup sync service
-   if (this.optimizedSyncService) {
-     logger.info('🔄 Stopping OptimizedSyncService...');
-     cleanupPromises.push(this.optimizedSyncService.destroy());
+   // Cleanup zone transition service
+   if (this.zoneTransitionService) {
+     logger.info('🎯 Stopping Zone Transition Service...');
+     cleanupPromises.push(this.zoneTransitionService.stop());
    }
 
-   // Cleanup controllers
-   if (this.playerController) {
-     logger.info('👥 Stopping PlayerController...');
-     cleanupPromises.push(this.playerController.destroy());
+   // Cleanup batch sync service
+   if (this.batchSyncService) {
+     logger.info('⚡ Stopping Batch Sync Service...');
+     cleanupPromises.push(this.batchSyncService.stop());
    }
    
    // Cleanup Redis
@@ -1208,7 +1173,7 @@ class Application {
    // Wait for all cleanup operations (with timeout)
    await Promise.race([
      Promise.allSettled(cleanupPromises),
-     new Promise(resolve => setTimeout(resolve, 15000)) // 15 second timeout
+     new Promise(resolve => setTimeout(resolve, 10000)) // 10 second timeout
    ]);
    
    logger.info('✅ Cleanup completed');
@@ -1220,25 +1185,27 @@ class Application {
    return this.app;
  }
 
- getWSServer(): FixedZoneWebSocketServer | null {
-   return this.wsServer;
- }
-
  getServices() {
    return {
      database: this.dbService,
      redis: this.redisService,
-     calculator: this.calculatorService,
-     sync: this.optimizedSyncService,
-     apiKey: this.apiKeyService
+     zoneLoader: this.zoneLoaderService,
+     zoneTransitions: this.zoneTransitionService,
+     batchSync: this.batchSyncService,
+     apiKey: this.apiKeyService,
+     calculator: this.calculatorService
    };
  }
 
  getControllers() {
    return {
-     zone: this.zoneController,
-     player: this.playerController
+     player: this.playerController,
+     zone: this.zoneController
    };
+ }
+
+ getWebSocketServer() {
+   return this.wsServer;
  }
 
  async stop(): Promise<void> {
@@ -1247,7 +1214,8 @@ class Application {
 
  isReady(): boolean {
    return !this.isShuttingDown && 
-          this.optimizedSyncService?.isReady() && 
+          this.zoneTransitionService?.isRunning() && 
+          this.batchSyncService?.getStats().isRunning &&
           this.redisService !== null && 
           this.dbService !== null;
  }
