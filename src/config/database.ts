@@ -2,7 +2,7 @@ import { Pool, PoolConfig } from 'pg';
 import { logger } from '../utils/logger';
 
 export class DatabaseConfig {
-  private static instance: Pool | null = null; // ✅ FIX: Déclaration explicite avec null
+  private static instance: Pool | null = null;
 
   static getInstance(): Pool {
     if (!DatabaseConfig.instance) {
@@ -20,7 +20,6 @@ export class DatabaseConfig {
       DatabaseConfig.instance.on('connect', (client) => {
         logger.debug('Nouvelle connexion PostgreSQL établie');
         
-        // Configuration de session par défaut - CORRECTION
         client.query("SET application_name = 'minecraft-zones-backend'")
           .catch(err => logger.warn('Erreur configuration session:', err));
       });
@@ -85,7 +84,7 @@ export class DatabaseConfig {
       } catch (error) {
         logger.error('Erreur fermeture pool PostgreSQL:', error);
       } finally {
-        DatabaseConfig.instance = null; // ✅ FIX: Assignation explicite null
+        DatabaseConfig.instance = null;
       }
     }
   }

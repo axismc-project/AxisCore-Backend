@@ -37,21 +37,81 @@ export class DatabaseService {
   // Modifiez cette méthode dans DatabaseService.ts
 private safeJsonParse(jsonString: any, fallback: any = []): any {
   try {
-    // ✅ FIX: Si c'est déjà un objet (PostgreSQL JSONB), le retourner tel quel
-    if (typeof jsonString === 'object' && jsonString !== null) {
-      return jsonString; // Déjà parsé par le driver PostgreSQL
-    } else if (typeof jsonString === 'string') {
-      return JSON.parse(jsonString); // Parse si c'est une string
-    } else {
-      logger.warn('Invalid JSON data type', { type: typeof jsonString, value: jsonString });
-      return fallback;
+    // Si c'est déjà un objet (PostgreSQL JSONB), le retourner tel quel
+    if (typeof jsonString === 'object' && jsonString !== null && !Array.isArray(jsonString)) {
+      return jsonString;
     }
+    // Si c'est un array, le retourner tel quel
+    if (Array.isArray(jsonString)) {
+      return jsonString;
+    }
+    // Si c'est une string, essayer de la parser
+    if (typeof jsonString === 'string') {
+      return JSON.parse(jsonString);
+    }
+    // Sinon retourner le fallback
+    logger.warn('Invalid JSON data type', { type: typeof jsonString, value: jsonString });
+    return fallback;
   } catch (error) {
     logger.error('Failed to parse JSON', { 
       jsonString, 
       error: error instanceof Error ? error.message : 'Unknown error' 
     });
     return fallback;
+  }
+}
+
+async revokeApiKey(keyName: string): Promise<boolean> {
+  const query = `
+    UPDATE api_keys 
+    SET is_active = false, updated_at = CURRENT_TIMESTAMP
+    WHERE key_name = $1
+  `;
+
+  try {
+    const result = await this.pool.query(query, [keyName]);
+    
+    // Vérification null-safe de rowCount
+    const revoked = result.rowCount ? result.rowCount > 0 : false;
+    
+    if (revoked) {
+      logger.info('API key revoked', { keyName });
+    }
+    
+    return revoked;
+  } catch (error) {
+    logger.error('Failed to revoke API key', { 
+      keyName, 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
+    return false;
+  }
+}
+
+async updateApiKeyRateLimits(keyName: string, rateLimitPerHour: number, rateLimitPerMinute: number): Promise<boolean> {
+  const query = `
+    UPDATE api_keys 
+    SET rate_limit_per_hour = $1, rate_limit_per_minute = $2, updated_at = CURRENT_TIMESTAMP
+    WHERE key_name = $3 AND is_active = true
+  `;
+
+  try {
+    const result = await this.pool.query(query, [rateLimitPerHour, rateLimitPerMinute, keyName]);
+    const updated = result.rowCount ? result.rowCount > 0 : false;
+    
+    if (updated) {
+      logger.info('API key rate limits updated', { keyName, rateLimitPerHour, rateLimitPerMinute });
+    }
+    
+    return updated;
+  } catch (error) {
+    logger.error('Failed to update API key rate limits', { 
+      keyName, 
+      rateLimitPerHour, 
+      rateLimitPerMinute, 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
+    return false;
   }
 }
 
