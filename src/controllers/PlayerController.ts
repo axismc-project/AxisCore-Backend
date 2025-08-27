@@ -164,153 +164,156 @@ export class PlayerController {
 
   // ========== NOUVEAU ENDPOINT WHOIS ==========
   
-  async whoIs(req: Request, res: Response): Promise<void> {
-    try {
-      const { uuid, name } = req.body;
+// src/controllers/PlayerController.ts - CORRECTION de la méthode whoIs
 
-      // Validation - soit uuid soit name doit être fourni
-      if (!uuid && !name) {
-        res.status(400).json({
-          error: 'Missing identifier',
-          message: 'Either uuid (server UUID) or name (player name) must be provided',
-          example: {
-            byUuid: { uuid: "550e8400-e29b-41d4-a716-446655440000" },
-            byName: { name: "PlayerName" }
-          }
-        });
-        return;
-      }
+async whoIs(req: Request, res: Response): Promise<void> {
+  try {
+    const { uuid, name } = req.body;
 
-      if (uuid && name) {
-        res.status(400).json({
-          error: 'Too many identifiers',
-          message: 'Provide either uuid OR name, not both'
-        });
-        return;
-      }
-
-      let player = null;
-
-      // Recherche par UUID (server_uuid)
-      if (uuid) {
-        if (!SecurityUtils.isValidUUID(uuid)) {
-          res.status(400).json({
-            error: 'Invalid UUID format',
-            message: 'UUID must be in valid format'
-          });
-          return;
+    // Validation - soit uuid soit name doit être fourni
+    if (!uuid && !name) {
+      res.status(400).json({
+        error: 'Missing identifier',
+        message: 'Either uuid (server UUID) or name (player name) must be provided',
+        example: {
+          byServerUuid: { uuid: "550e8400-e29b-41d4-a716-446655440000" },
+          byName: { name: "PlayerName" }
         }
-
-        player = await this.db.getPlayerByServerUuid(uuid);
-        
-        if (!player) {
-          res.status(404).json({
-            error: 'Player not found',
-            message: `No player found with server UUID: ${uuid}`,
-            searchedBy: 'server_uuid'
-          });
-          return;
-        }
-      }
-
-      // Recherche par nom
-      if (name) {
-        if (!SecurityUtils.isValidPlayerName(name)) {
-          res.status(400).json({
-            error: 'Invalid player name',
-            message: 'Player name must be 3-16 characters, alphanumeric and underscore only'
-          });
-          return;
-        }
-
-        player = await this.db.getPlayerByPlayerName(name);
-        
-        if (!player) {
-          res.status(404).json({
-            error: 'Player not found',
-            message: `No player found with name: ${name}`,
-            searchedBy: 'player_name'
-          });
-          return;
-        }
-      }
-
-      // Enrichir avec les données Redis
-      const [redisPosition, redisSync] = await Promise.all([
-        this.redis.getPlayerPosition(player!.server_uuid),
-        this.getRedisSync(player!.player_uuid)
-      ]);
-
-      const response = {
-        success: true,
-        message: 'Player found',
-        searchedBy: uuid ? 'server_uuid' : 'player_name',
-        data: {
-          // Données de base
-          id: player!.id,
-          server_uuid: player!.server_uuid,
-          player_uuid: player!.player_uuid,
-          player_name: player!.player_name,
-          is_online: player!.is_online,
-          last_updated: player!.last_updated,
-          
-          // Position en base
-          database_position: {
-            x: player!.x,
-            y: player!.y,
-            z: player!.z,
-            chunk_x: player!.chunk_x,
-            chunk_z: player!.chunk_z
-          },
-          
-          // Position Redis (plus récente)
-          redis_position: redisPosition,
-          
-          // Zones actuelles
-          zones: {
-            region: {
-              id: player!.region_id,
-              name: player!.region_name || null
-            },
-            node: {
-              id: player!.node_id,
-              name: player!.node_name || null
-            },
-            city: {
-              id: player!.city_id,
-              name: player!.city_name || null
-            }
-          },
-          
-          // Statut de synchronisation
-          sync_status: {
-            redis_synced: redisSync,
-            last_redis_update: redisPosition?.timestamp ? new Date(redisPosition.timestamp).toISOString() : null,
-            position_source: redisPosition ? 'redis' : 'database'
-          }
-        }
-      };
-
-      res.json(response);
-
-      logger.info('🔍 Player lookup completed', {
-        searchedBy: uuid ? 'server_uuid' : 'player_name',
-        identifier: uuid ? uuid.substring(0, 8) + '...' : name,
-        found: true,
-        player_name: player!.player_name
       });
-
-    } catch (error) {
-      logger.error('❌ Failed to lookup player', { 
-        body: req.body,
-        error: error instanceof Error ? error.message : 'Unknown error'
-      });
-      res.status(500).json({
-        error: 'Server error',
-        message: 'Unable to lookup player information'
-      });
+      return;
     }
+
+    if (uuid && name) {
+      res.status(400).json({
+        error: 'Too many identifiers',
+        message: 'Provide either uuid OR name, not both'
+      });
+      return;
+    }
+
+    let player = null;
+
+    // ✅ CORRECTION : Recherche par UUID = recherche par server_uuid
+    if (uuid) {
+      if (!SecurityUtils.isValidUUID(uuid)) {
+        res.status(400).json({
+          error: 'Invalid UUID format',
+          message: 'UUID must be in valid format'
+        });
+        return;
+      }
+
+      // ✅ FIX: Chercher par server_uuid quand on reçoit "uuid"
+      player = await this.db.getPlayerByServerUuid(uuid);
+      
+      if (!player) {
+        res.status(404).json({
+          error: 'Player not found',
+          message: `No player found with server UUID: ${uuid}`,
+          searchedBy: 'server_uuid'
+        });
+        return;
+      }
+    }
+
+    // Recherche par nom (inchangée)
+    if (name) {
+      if (!SecurityUtils.isValidPlayerName(name)) {
+        res.status(400).json({
+          error: 'Invalid player name',
+          message: 'Player name must be 3-16 characters, alphanumeric and underscore only'
+        });
+        return;
+      }
+
+      player = await this.db.getPlayerByPlayerName(name);
+      
+      if (!player) {
+        res.status(404).json({
+          error: 'Player not found',
+          message: `No player found with name: ${name}`,
+          searchedBy: 'player_name'
+        });
+        return;
+      }
+    }
+
+    // Enrichir avec les données Redis (inchangé)
+    const [redisPosition, redisSync] = await Promise.all([
+      this.redis.getPlayerPosition(player!.server_uuid), // ✅ Utilise server_uuid pour Redis
+      this.getRedisSync(player!.player_uuid) // ✅ Utilise player_uuid pour sync status
+    ]);
+
+    const response = {
+      success: true,
+      message: 'Player found',
+      searchedBy: uuid ? 'server_uuid' : 'player_name', // ✅ Clarification du type de recherche
+      data: {
+        // Données de base
+        id: player!.id,
+        server_uuid: player!.server_uuid,
+        player_uuid: player!.player_uuid,
+        player_name: player!.player_name,
+        is_online: player!.is_online,
+        last_updated: player!.last_updated,
+        
+        // Position en base
+        database_position: {
+          x: player!.x,
+          y: player!.y,
+          z: player!.z,
+          chunk_x: player!.chunk_x,
+          chunk_z: player!.chunk_z
+        },
+        
+        // Position Redis (plus récente)
+        redis_position: redisPosition,
+        
+        // Zones actuelles
+        zones: {
+          region: {
+            id: player!.region_id,
+            name: player!.region_name || null
+          },
+          node: {
+            id: player!.node_id,
+            name: player!.node_name || null
+          },
+          city: {
+            id: player!.city_id,
+            name: player!.city_name || null
+          }
+        },
+        
+        // Statut de synchronisation
+        sync_status: {
+          redis_synced: redisSync,
+          last_redis_update: redisPosition?.timestamp ? new Date(redisPosition.timestamp).toISOString() : null,
+          position_source: redisPosition ? 'redis' : 'database'
+        }
+      }
+    };
+
+    res.json(response);
+
+    logger.info('🔍 Player lookup completed', {
+      searchedBy: uuid ? 'server_uuid' : 'player_name',
+      identifier: uuid ? uuid.substring(0, 8) + '...' : name,
+      found: true,
+      player_name: player!.player_name
+    });
+
+  } catch (error) {
+    logger.error('❌ Failed to lookup player', { 
+      body: req.body,
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+    res.status(500).json({
+      error: 'Server error',
+      message: 'Unable to lookup player information'
+    });
   }
+}
 
   // ========== POSITION UPDATE ==========
   
