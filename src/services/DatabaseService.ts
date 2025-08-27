@@ -238,6 +238,168 @@ async getAllRegions(): Promise<Region[]> {
   }
 }
 
+// Ajouter cette méthode à DatabaseService.ts
+
+// Ajouter ces méthodes à DatabaseService.ts
+
+// ========== CORRECTION DES MÉTHODES MANQUANTES ==========
+
+async batchUpdatePlayerPositions(updates: Array<{
+  uuid: string;
+  name: string;
+  x: number;
+  y: number;
+  z: number;
+  chunkX: number;
+  chunkZ: number;
+  regionId: number | null;
+  nodeId: number | null;
+  cityId: number | null;
+  timestamp: number;
+}>): Promise<void> {
+  if (updates.length === 0) return;
+
+  const client = await this.pool.connect();
+  
+  try {
+    await client.query('BEGIN');
+
+    // Utiliser une requête en batch plus efficace
+    const values = updates.map((_, index) => {
+      const base = index * 11;
+      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11})`;
+    }).join(',');
+
+    const params = updates.flatMap(update => [
+      update.uuid, // Utilisé pour WHERE server_uuid = ? OR player_uuid = ?
+      update.x,
+      update.y,
+      update.z,
+      update.chunkX,
+      update.chunkZ,
+      update.regionId,
+      update.nodeId,
+      update.cityId,
+      new Date(update.timestamp),
+      true // redis_synced = true
+    ]);
+
+    // Requête de mise à jour par batch
+    for (let i = 0; i < updates.length; i++) {
+      const update = updates[i];
+      await client.query(`
+        UPDATE players SET
+          x = $2,
+          y = $3,
+          z = $4,
+          chunk_x = $5,
+          chunk_z = $6,
+          region_id = $7,
+          node_id = $8,
+          city_id = $9,
+          last_updated = $10,
+          redis_synced = $11
+        WHERE server_uuid = $1 OR player_uuid = $1
+      `, [
+        update.uuid,
+        update.x,
+        update.y,
+        update.z,
+        update.chunkX,
+        update.chunkZ,
+        update.regionId,
+        update.nodeId,
+        update.cityId,
+        new Date(update.timestamp),
+        true
+      ]);
+    }
+
+    await client.query('COMMIT');
+    logger.info('✅ Batch player positions updated', { count: updates.length });
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    logger.error('❌ Failed to batch update player positions', { 
+      error: error instanceof Error ? error.message : 'Unknown error',
+      count: updates.length 
+    });
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+// Méthode pour marquer les joueurs comme synchronisés avec Redis
+async markPlayerRedisSynced(playerUuid: string, synced: boolean = true): Promise<void> {
+  const query = `
+    UPDATE players 
+    SET redis_synced = $1, last_updated = CURRENT_TIMESTAMP
+    WHERE server_uuid = $2 OR player_uuid = $2
+  `;
+
+  try {
+    const result = await this.pool.query(query, [synced, playerUuid]);
+    
+    if ((result.rowCount || 0) === 0) {
+      logger.warn('⚠️ Player not found for Redis sync update', { 
+        playerUuid: playerUuid.substring(0, 8) + '...' 
+      });
+    } else {
+      logger.debug('✅ Player Redis sync status updated', { 
+        playerUuid: playerUuid.substring(0, 8) + '...',
+        synced 
+      });
+    }
+    
+  } catch (error) {
+    logger.error('❌ Failed to update Redis sync status', { 
+      playerUuid: playerUuid.substring(0, 8) + '...',
+      synced,
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
+    throw error;
+  }
+}
+
+// Méthode pour obtenir les joueurs non synchronisés avec Redis
+async getUnsyncedPlayers(limit: number = 100): Promise<Array<{
+  id: number;
+  server_uuid: string;
+  player_uuid: string;
+  player_name: string;
+  x: number;
+  y: number;
+  z: number;
+  chunk_x: number;
+  chunk_z: number;
+  last_updated: Date;
+}>> {
+  const query = `
+    SELECT id, server_uuid, player_uuid, player_name, x, y, z, chunk_x, chunk_z, last_updated
+    FROM players 
+    WHERE redis_synced = false 
+      AND is_online = true
+    ORDER BY last_updated ASC
+    LIMIT $1
+  `;
+
+  try {
+    const result = await this.pool.query(query, [limit]);
+    return result.rows.map(row => ({
+      ...row,
+      last_updated: new Date(row.last_updated)
+    }));
+  } catch (error) {
+    logger.error('❌ Failed to get unsynced players', { 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    });
+    throw error;
+  }
+}
+
+
+
 async getAllNodes(): Promise<Node[]> {
   const query = 'SELECT * FROM nodes WHERE is_active = true ORDER BY region_id, name';
   try {

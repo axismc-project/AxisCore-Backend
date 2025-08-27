@@ -449,210 +449,217 @@ class Application {
 
  // ========== ROUTES ==========
  
- private setupRoutes(): void {
-   // ========== PUBLIC ROUTES ==========
-   
-   this.app.get('/', (req, res) => {
-     const uptime = Date.now() - this.startupTime;
-     
-     res.json({
-       name: 'Minecraft Zones Backend',
-       version: '2.0.0-FULLY-OPTIMIZED',
-       status: 'running',
-       environment: process.env.NODE_ENV || 'development',
-       uptime: Math.floor(uptime / 1000),
-       architecture: {
-         flow: 'Jedis → Redis Keyspace → Zone Transitions → WebSocket + Batch Sync',
-         features: [
-           '✅ Real-time zone transition detection (<1ms)',
-           '✅ WebSocket broadcasting with compression',
-           '✅ Redis chunk zone cache (instant lookup)',
-           '✅ Batch sync Redis → PostgreSQL',
-           '✅ API key authentication & rate limiting',
-           '✅ Keyspace notifications (KEh configuration)'
-         ]
-       },
-       services: {
-         zoneTransitions: this.zoneTransitionService?.isRunning() || false,
-         batchSync: this.batchSyncService?.getStats().isRunning || false,
-         websocket: this.wsServer?.getConnectedClientsCount() || 0,
-         redis: 'Active with keyspace notifications'
-       },
-       endpoints: {
-         websocket: 'ws://localhost:3000/ws/zones?api_key=xxx',
-         health: '/api/health',
-         testing: '/api/websocket/test',
-         player: '/api/player/userlog (for Minecraft plugin)',
-         chunks: '/api/chunk/:x/:z'
-       }
-     });
-   });
+// Remplacer la section setupRoutes() dans src/app.ts
 
-   this.app.get('/api/health', async (req, res) => {
-     try {
-       const [redisStats, batchStats, cacheStats, dbTest] = await Promise.all([
-         this.redisService.getStats(),
-         this.batchSyncService.getStats(),
-         this.zoneLoaderService.getCacheStats(),
-         DatabaseConfig.testConnection()
-       ]);
+private setupRoutes(): void {
+  // ========== PUBLIC ROUTES ==========
+  
+  this.app.get('/', (req, res) => {
+    const uptime = Date.now() - this.startupTime;
+    
+    res.json({
+      name: 'Minecraft Zones Backend',
+      version: '2.0.0-FULLY-OPTIMIZED',
+      status: 'running',
+      environment: process.env.NODE_ENV || 'development',
+      uptime: Math.floor(uptime / 1000),
+      architecture: {
+        flow: 'Jedis → Redis Keyspace → Zone Transitions → WebSocket + Batch Sync',
+        features: [
+          '✅ Real-time zone transition detection (<1ms)',
+          '✅ WebSocket broadcasting with compression',
+          '✅ Redis chunk zone cache (instant lookup)',
+          '✅ Batch sync Redis → PostgreSQL with redis_synced tracking',
+          '✅ API key authentication & rate limiting',
+          '✅ Keyspace notifications (KEh configuration)',
+          '✅ Player identification system with Mojang API'
+        ]
+      },
+      services: {
+        zoneTransitions: this.zoneTransitionService?.isRunning() || false,
+        batchSync: this.batchSyncService?.getStats().isRunning || false,
+        websocket: this.wsServer?.getConnectedClientsCount() || 0,
+        redis: 'Active with keyspace notifications'
+      },
+      endpoints: {
+        websocket: 'ws://localhost:3000/ws/zones?api_key=xxx',
+        health: '/api/health',
+        testing: '/api/websocket/test',
+        player: {
+          userlog: 'POST /api/player/userlog (for Minecraft plugin)',
+          whois: 'POST /api/player/whois (lookup by uuid or name)',
+          position: 'POST /api/player/:uuid/position'
+        },
+        chunks: '/api/chunk/:x/:z'
+      }
+    });
+  });
 
-       const isHealthy = redisStats.connectedClients && dbTest && this.zoneTransitionService.isRunning();
+  this.app.get('/api/health', async (req, res) => {
+    try {
+      const [redisStats, batchStats, cacheStats, dbTest] = await Promise.all([
+        this.redisService.getStats(),
+        this.batchSyncService.getStats(),
+        this.zoneLoaderService.getCacheStats(),
+        DatabaseConfig.testConnection()
+      ]);
 
-       res.status(isHealthy ? 200 : 503).json({
-         status: isHealthy ? 'healthy' : 'unhealthy',
-         timestamp: new Date().toISOString(),
-         uptime: Math.floor((Date.now() - this.startupTime) / 1000),
-         services: {
-           database: dbTest,
-           redis: redisStats,
-           zoneCache: cacheStats,
-           batchSync: batchStats,
-           zoneTransitions: this.zoneTransitionService.isRunning(),
-           websocket: this.wsServer?.getConnectedClientsCount() || 0
-         },
-         integration: {
-           jedisToRedis: 'Plugin writes via Jedis HSET',
-           redisToTransitions: 'Keyspace notifications active',
-           transitionsToWebSocket: 'Real-time broadcasting',
-           redisToDB: `Batch sync every ${batchStats.nextSyncIn}ms`
-         }
-       });
-     } catch (error) {
-       res.status(500).json({
-         status: 'error',
-         error: 'Health check failed',
-         timestamp: new Date().toISOString()
-       });
-     }
-   });
+      const isHealthy = redisStats.connectedClients && dbTest && this.zoneTransitionService.isRunning();
 
-   this.app.get('/api/websocket/test', (req, res) => {
-     const connectedClients = this.wsServer?.getConnectedClientsCount() || 0;
-     
-     res.json({
-       websocket: {
-         status: 'active',
-         endpoint: `ws://${req.get('host')}/ws/zones`,
-         connectedClients,
-         authentication: {
-           required: true,
-           methods: ['?api_key=xxx', 'Authorization: Bearer xxx'],
-           permissions: 'zone:read permission required'
-         },
-         realTimeEvents: {
-           type: 'zone_event',
-           actions: ['enter', 'leave'],
-           zoneTypes: ['region', 'node', 'city'],
-           format: {
-             playerUuid: 'string',
-             action: 'enter|leave',
-             zoneType: 'region|node|city',
-             zoneId: 'number',
-             zoneName: 'string',
-             timestamp: 'number'
-           }
-         },
-         testingGuide: {
-           step1: 'Create API key: POST /api/admin/api-keys',
-           step2: 'Connect: ws://localhost:3000/ws/zones?api_key=xxx',
-           step3: 'Move player between zones in Minecraft',
-           step4: 'Observe real-time zone_event messages',
-           troubleshooting: {
-             noEvents: 'Player must cross chunk boundaries between different zones',
-             authFailed: 'Verify API key has zone:read permission',
-             noConnection: 'Check API key format and WebSocket URL'
-           }
-         }
-       }
-     });
-   });
+      res.status(isHealthy ? 200 : 503).json({
+        status: isHealthy ? 'healthy' : 'unhealthy',
+        timestamp: new Date().toISOString(),
+        uptime: Math.floor((Date.now() - this.startupTime) / 1000),
+        services: {
+          database: dbTest,
+          redis: redisStats,
+          zoneCache: cacheStats,
+          batchSync: batchStats,
+          zoneTransitions: this.zoneTransitionService.isRunning(),
+          websocket: this.wsServer?.getConnectedClientsCount() || 0
+        },
+        integration: {
+          jedisToRedis: 'Plugin writes via Jedis HSET',
+          redisToTransitions: 'Keyspace notifications active',
+          transitionsToWebSocket: 'Real-time broadcasting',
+          redisToDB: `Batch sync every ${batchStats.nextSyncIn}ms`
+        }
+      });
+    } catch (error) {
+      res.status(500).json({
+        status: 'error',
+        error: 'Health check failed',
+        timestamp: new Date().toISOString()
+      });
+    }
+  });
 
-   // ========== API KEY MANAGEMENT ==========
-   
-   this.app.post('/api/admin/api-keys', this.createApiKey.bind(this));
-   this.app.get('/api/admin/api-keys', this.listApiKeys.bind(this));
-   this.app.delete('/api/admin/api-keys/:keyName', this.revokeApiKey.bind(this));
-   this.app.get('/api/admin/api-keys/stats', this.getApiKeyStats.bind(this));
+  this.app.get('/api/websocket/test', (req, res) => {
+    const connectedClients = this.wsServer?.getConnectedClientsCount() || 0;
+    
+    res.json({
+      websocket: {
+        status: 'active',
+        endpoint: `ws://${req.get('host')}/ws/zones`,
+        connectedClients,
+        authentication: {
+          required: true,
+          methods: ['?api_key=xxx', 'Authorization: Bearer xxx'],
+          permissions: 'zone:read permission required'
+        },
+        realTimeEvents: {
+          type: 'zone_event',
+          actions: ['enter', 'leave'],
+          zoneTypes: ['region', 'node', 'city'],
+          format: {
+            playerUuid: 'string',
+            action: 'enter|leave',
+            zoneType: 'region|node|city',
+            zoneId: 'number',
+            zoneName: 'string',
+            timestamp: 'number'
+          }
+        },
+        testingGuide: {
+          step1: 'Create API key: POST /api/admin/api-keys',
+          step2: 'Connect: ws://localhost:3000/ws/zones?api_key=xxx',
+          step3: 'Move player between zones in Minecraft',
+          step4: 'Observe real-time zone_event messages',
+          troubleshooting: {
+            noEvents: 'Player must cross chunk boundaries between different zones',
+            authFailed: 'Verify API key has zone:read permission',
+            noConnection: 'Check API key format and WebSocket URL'
+          }
+        }
+      }
+    });
+  });
 
-   // ========== PLAYER ENDPOINTS ==========
-   
-   this.app.post('/api/player/userlog', 
-     this.playerController.handleUserLog.bind(this.playerController)
-   );
+  // ========== API KEY MANAGEMENT ==========
+  
+  this.app.post('/api/admin/api-keys', this.createApiKey.bind(this));
+  this.app.get('/api/admin/api-keys', this.listApiKeys.bind(this));
+  this.app.delete('/api/admin/api-keys/:keyName', this.revokeApiKey.bind(this));
+  this.app.get('/api/admin/api-keys/stats', this.getApiKeyStats.bind(this));
 
-   this.app.get('/api/player/:uuid', 
-     this.validateUUID.bind(this),
-     this.playerController.getPlayerInfo.bind(this.playerController)
-   );
-   
-   this.app.post('/api/player/:uuid/position', 
-     this.validateUUID.bind(this),
-     this.validatePosition.bind(this),
-     this.playerController.updatePlayerPosition.bind(this.playerController)
-   );
+  // ========== PLAYER ENDPOINTS (CORRIGÉS) ==========
+  
+  this.app.post('/api/player/userlog', 
+    this.playerController.handleUserLog.bind(this.playerController)
+  );
 
-   // ========== ZONE ENDPOINTS ==========
-   
-   this.app.get('/api/chunk/:chunkX/:chunkZ', 
-     this.validateChunkCoords.bind(this),
-     this.playerController.getChunkInfo.bind(this.playerController)
-   );
+  // NOUVEAU : Endpoint whois remplace l'ancien /api/player/:uuid
+  this.app.post('/api/player/whois', 
+    this.playerController.whoIs.bind(this.playerController)
+  );
+  
+  this.app.post('/api/player/:uuid/position', 
+    this.validateUUID.bind(this),
+    this.validatePosition.bind(this),
+    this.playerController.updatePlayerPosition.bind(this.playerController)
+  );
 
-   this.app.get('/api/zones/hierarchy', 
-     this.zoneController.getZoneHierarchy.bind(this.zoneController)
-   );
+  // ========== ZONE ENDPOINTS ==========
+  
+  this.app.get('/api/chunk/:chunkX/:chunkZ', 
+    this.validateChunkCoords.bind(this),
+    this.playerController.getChunkInfo.bind(this.playerController)
+  );
 
-   this.app.get('/api/zone/:zoneType/:zoneId',
-     this.validateZoneParams.bind(this),
-     this.zoneController.getZoneById.bind(this.zoneController)
-   );
+  this.app.get('/api/zones/hierarchy', 
+    this.zoneController.getZoneHierarchy.bind(this.zoneController)
+  );
 
-   // ========== ADMIN ENDPOINTS ==========
-   
-   this.app.get('/api/admin/sync/status', this.getSyncStatus.bind(this));
-   this.app.post('/api/admin/sync/force', this.forceSync.bind(this));
-   
-   // Zone cache management
-   this.app.post('/api/admin/zones/reload', this.reloadZones.bind(this));
-   this.app.get('/api/admin/zones/cache-stats', this.getZoneCacheStats.bind(this));
-   this.app.post('/api/admin/zones/:zoneType/:zoneId/reload', this.reloadSpecificZone.bind(this));
+  this.app.get('/api/zone/:zoneType/:zoneId',
+    this.validateZoneParams.bind(this),
+    this.zoneController.getZoneById.bind(this.zoneController)
+  );
 
-   // System information
-   this.app.get('/api/admin/system', this.getSystemInfo.bind(this));
+  // ========== ADMIN ENDPOINTS ==========
+  
+  this.app.get('/api/admin/sync/status', this.getSyncStatus.bind(this));
+  this.app.post('/api/admin/sync/force', this.forceSync.bind(this));
+  
+  // Zone cache management
+  this.app.post('/api/admin/zones/reload', this.reloadZones.bind(this));
+  this.app.get('/api/admin/zones/cache-stats', this.getZoneCacheStats.bind(this));
+  this.app.post('/api/admin/zones/:zoneType/:zoneId/reload', this.reloadSpecificZone.bind(this));
 
-   // ========== 404 HANDLER ==========
-   this.app.use('*', (req, res) => {
-     res.status(404).json({
-       error: 'Endpoint not found',
-       message: `${req.method} ${req.originalUrl} does not exist`,
-       timestamp: new Date().toISOString(),
-       availableEndpoints: {
-         public: [
-           'GET /',
-           'GET /api/health', 
-           'GET /api/websocket/test'
-         ],
-         player: [
-           'POST /api/player/userlog',
-           'GET /api/player/:uuid',
-           'POST /api/player/:uuid/position'
-         ],
-         zones: [
-           'GET /api/chunk/:x/:z',
-           'GET /api/zones/hierarchy',
-           'GET /api/zone/:type/:id'
-         ],
-         admin: [
-           'POST /api/admin/api-keys',
-           'GET /api/admin/sync/status',
-           'POST /api/admin/zones/reload'
-         ],
-         websocket: 'ws://localhost:3000/ws/zones?api_key=xxx'
-       }
-     });
-   });
- }
+  // System information
+  this.app.get('/api/admin/system', this.getSystemInfo.bind(this));
+
+  // ========== 404 HANDLER ==========
+  this.app.use('*', (req, res) => {
+    res.status(404).json({
+      error: 'Endpoint not found',
+      message: `${req.method} ${req.originalUrl} does not exist`,
+      timestamp: new Date().toISOString(),
+      availableEndpoints: {
+        public: [
+          'GET /',
+          'GET /api/health', 
+          'GET /api/websocket/test'
+        ],
+        player: [
+          'POST /api/player/userlog',
+          'POST /api/player/whois',
+          'POST /api/player/:uuid/position'
+        ],
+        zones: [
+          'GET /api/chunk/:x/:z',
+          'GET /api/zones/hierarchy',
+          'GET /api/zone/:type/:id'
+        ],
+        admin: [
+          'POST /api/admin/api-keys',
+          'GET /api/admin/sync/status',
+          'POST /api/admin/zones/reload'
+        ],
+        websocket: 'ws://localhost:3000/ws/zones?api_key=xxx'
+      }
+    });
+  });
+}
 
  // ========== VALIDATION MIDDLEWARES ==========
  

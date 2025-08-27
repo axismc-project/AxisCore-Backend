@@ -262,68 +262,72 @@ async getPlayerPreviousZones(uuid: string): Promise<ChunkZoneData | null> {
   }
 }
 
-  private async handlePlayerKeyspaceEvent(
-    message: string, 
-    channel: string, 
-    callback: (event: ZoneTransitionEvent) => void
-  ): Promise<void> {
+// Remplacer la méthode handlePlayerKeyspaceEvent dans RedisService.ts
+
+private async handlePlayerKeyspaceEvent(
+  message: string, 
+  channel: string, 
+  callback: (event: ZoneTransitionEvent) => void
+): Promise<void> {
+  
+  // Extraire UUID du channel
+  const match = channel.match(/__keyspace@0__:player:(pos|chunk):(.+)/);
+  if (!match) return;
+  
+  const [, type, uuid] = match;
+  
+  // Traiter les événements chunk et pos
+  if (type !== 'chunk' && type !== 'pos') return;
+  
+  logger.debug('🎯 Player movement detected', { 
+    uuid: uuid.substring(0, 8) + '...',
+    type, 
+    operation: message 
+  });
+  
+  try {
+    // Délai pour s'assurer que les données sont écrites
+    await new Promise(resolve => setTimeout(resolve, 50));
     
-    // Extraire UUID du channel : __keyspace@0__:player:pos:uuid ou player:chunk:uuid
-    const match = channel.match(/__keyspace@0__:player:(pos|chunk):(.+)/);
-    if (!match) return;
+    const [currentChunk, currentPosition] = await Promise.all([
+      this.getPlayerChunk(uuid),
+      this.getPlayerPosition(uuid)
+    ]);
     
-    const [, type, uuid] = match;
+    if (!currentChunk) return;
     
-    // On ne traite que les événements chunk (changement de chunk = potentiel changement de zone)
-    if (type !== 'chunk') return;
+    // Récupérer les zones précédentes
+    const previousZones = await this.getPlayerPreviousZones(uuid);
     
-    logger.debug('🎯 Player chunk change detected', { uuid, channel, message });
+    // Récupérer les zones actuelles
+    const currentZones = await this.getChunkZone(currentChunk.chunk_x, currentChunk.chunk_z);
     
-    try {
-      // Récupérer les données actuelles
-      const [currentChunk, previousPosition] = await Promise.all([
-        this.getPlayerChunk(uuid),
-        this.getPlayerPosition(uuid)
-      ]);
-      
-      if (!currentChunk) return;
-      
-      // Calculer le chunk précédent depuis la position
-      const previousChunk = previousPosition ? {
-        x: Math.floor(previousPosition.x / 16),
-        z: Math.floor(previousPosition.z / 16)
-      } : null;
-      
-      // Si même chunk, pas de transition
-      if (previousChunk && 
-          previousChunk.x === currentChunk.chunk_x && 
-          previousChunk.z === currentChunk.chunk_z) {
-        return;
-      }
-      
-      // Récupérer les zones
-      const [previousZones, currentZones] = await Promise.all([
-        previousChunk ? this.getChunkZone(previousChunk.x, previousChunk.z) : Promise.resolve(null),
-        this.getChunkZone(currentChunk.chunk_x, currentChunk.chunk_z)
-      ]);
-      
-      // Créer l'événement de transition
-      const transitionEvent: ZoneTransitionEvent = {
-        playerUuid: uuid,
-        previousChunk,
-        currentChunk: { x: currentChunk.chunk_x, z: currentChunk.chunk_z },
-        previousZones,
-        currentZones,
-        timestamp: Date.now()
-      };
-      
-      // Appeler le callback
-      callback(transitionEvent);
-      
-    } catch (error) {
-      logger.error('❌ Failed to process chunk change', { uuid, error });
-    }
-  }
+    // Créer l'événement de transition
+    const transitionEvent: ZoneTransitionEvent = {
+      playerUuid: uuid,
+      previousChunk: previousZones ? {
+        x: Math.floor((currentPosition?.x || 0) / 16),
+        z: Math.floor((currentPosition?.z || 0) / 16)
+      } : null,
+      currentChunk: { x: currentChunk.chunk_x, z: currentChunk.chunk_z },
+      previousZones,
+      currentZones,
+      timestamp: Date.now()
+    };
+    
+    // Appeler le callback
+    callback(transitionEvent);
+    
+    // Sauvegarder les zones actuelles comme précédentes
+    await this.setPlayerPreviousZones(uuid, currentZones);
+    
+  } catch (error) {
+    logger.error('❌ Failed to process movement event', { 
+      uuid: uuid.substring(0, 8) + '...',
+     error 
+   });
+ }
+}
 
   // ========== WEBSOCKET EVENTS ==========
   

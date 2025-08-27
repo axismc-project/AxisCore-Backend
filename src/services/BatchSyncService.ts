@@ -6,7 +6,7 @@ import { logger } from '../utils/logger';
 interface PlayerSyncData {
   uuid: string;
   position: PlayerPosition;
-  regions: { regionId: number | null; nodeId: number | null; cityId: number | null };
+  zones: { regionId: number | null; nodeId: number | null; cityId: number | null };
   lastSync: number;
 }
 
@@ -15,10 +15,9 @@ export class BatchSyncService {
   private isRunning = false;
   private isSyncing = false;
   
-  private readonly SYNC_INTERVAL = parseInt(process.env.BATCH_SYNC_INTERVAL || '30000'); // 30 secondes
+  private readonly SYNC_INTERVAL = parseInt(process.env.BATCH_SYNC_INTERVAL || '30000');
   private readonly BATCH_SIZE = parseInt(process.env.BATCH_SIZE || '100');
   
-  // Métriques
   private stats = {
     totalSyncs: 0,
     totalPlayers: 0,
@@ -32,8 +31,6 @@ export class BatchSyncService {
     private db: DatabaseService
   ) {}
 
-  // ========== LIFECYCLE ==========
-  
   async start(): Promise<void> {
     try {
       logger.info('⚡ Starting Batch Sync Service...', {
@@ -61,8 +58,6 @@ export class BatchSyncService {
     }
   }
 
-  // ========== SYNC LOGIC ==========
-  
   private async performSync(): Promise<void> {
     if (this.isSyncing || !this.isRunning) return;
     
@@ -86,7 +81,9 @@ export class BatchSyncService {
       // Sync par batches
       await this.syncInBatches(enrichedData);
       
-      // Métriques
+      // Mettre à jour les statuts de synchronisation
+      await this.updateSyncStatuses(enrichedData);
+      
       const duration = Date.now() - startTime;
       this.stats.totalSyncs++;
       this.stats.totalPlayers += enrichedData.length;
@@ -96,7 +93,7 @@ export class BatchSyncService {
       logger.info('✅ Batch sync completed', {
         playersCount: enrichedData.length,
         durationMs: duration,
-        avgPerPlayer: Math.round(duration / enrichedData.length * 100) / 100
+        avgPerPlayer: enrichedData.length > 0 ? Math.round(duration / enrichedData.length * 100) / 100 : 0
       });
       
     } catch (error) {
@@ -121,7 +118,7 @@ export class BatchSyncService {
         enrichedData.push({
           uuid,
           position,
-          regions: {
+          zones: {
             regionId: zones?.regionId || null,
             nodeId: zones?.nodeId || null,
             cityId: zones?.cityId || null
@@ -130,12 +127,11 @@ export class BatchSyncService {
         });
         
       } catch (error) {
-        logger.error('❌ Failed to enrich player data', { uuid, error });
-        // Ajouter quand même sans zones
+        logger.error('❌ Failed to enrich player data', { uuid: uuid.substring(0, 8) + '...', error });
         enrichedData.push({
           uuid,
           position,
-          regions: { regionId: null, nodeId: null, cityId: null },
+          zones: { regionId: null, nodeId: null, cityId: null },
           lastSync: Date.now()
         });
       }
@@ -165,33 +161,43 @@ export class BatchSyncService {
           playersCount: batch.length,
           error
         });
-        // Continue avec les autres batches
       }
     }
   }
 
   private async syncBatch(batch: PlayerSyncData[]): Promise<void> {
-    // Préparer les données pour la base
     const updates = batch.map(player => ({
       uuid: player.uuid,
-      name: `Player_${player.uuid.substring(0, 8)}`, // Nom générique, sera mis à jour par userlog
+      name: `Player_${player.uuid.substring(0, 8)}`,
       x: player.position.x,
       y: player.position.y,
       z: player.position.z,
       chunkX: player.position.chunk_x,
       chunkZ: player.position.chunk_z,
-      regionId: player.regions.regionId,
-      nodeId: player.regions.nodeId,
-      cityId: player.regions.cityId,
+      regionId: player.zones.regionId,
+      nodeId: player.zones.nodeId,
+      cityId: player.zones.cityId,
       timestamp: player.position.timestamp
     }));
     
-    // Utiliser la méthode batch existante
-    await this.db.batchUpdatePlayers(updates);
+    await this.db.batchUpdatePlayerPositions(updates);
   }
 
-  // ========== FORCE SYNC ==========
-  
+  private async updateSyncStatuses(data: PlayerSyncData[]): Promise<void> {
+    const promises = data.map(async player => {
+      try {
+        await this.redis.setEx(`player:sync:${player.uuid}`, 3600, 'true');
+      } catch (error) {
+        logger.warn('⚠️ Failed to update sync status', { 
+          uuid: player.uuid.substring(0, 8) + '...',
+          error 
+        });
+      }
+    });
+
+    await Promise.allSettled(promises);
+  }
+
   async forceSync(): Promise<{ success: boolean; playersCount: number; duration: number }> {
     if (this.isSyncing) {
       throw new Error('Sync already in progress');
@@ -218,8 +224,6 @@ export class BatchSyncService {
     }
   }
 
-  // ========== STATS ==========
-  
   getStats(): {
     isRunning: boolean;
     isSyncing: boolean;
@@ -240,8 +244,6 @@ export class BatchSyncService {
     };
   }
 
-  // ========== CLEANUP ==========
-  
   async stop(): Promise<void> {
     logger.info('🛑 Stopping Batch Sync Service...');
     
@@ -252,9 +254,8 @@ export class BatchSyncService {
       this.syncInterval = null;
     }
     
-    // Attendre la fin du sync en cours
     let retries = 0;
-    while (this.isSyncing && retries < 30) { // Max 30 secondes
+    while (this.isSyncing && retries < 30) {
       await new Promise(resolve => setTimeout(resolve, 1000));
       retries++;
     }
