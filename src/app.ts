@@ -661,7 +661,6 @@ private setupRoutes(): void {
   });
 }
 
- // ========== VALIDATION MIDDLEWARES ==========
  
  private validateUUID(req: express.Request, res: express.Response, next: express.NextFunction): void {
    if (!SecurityUtils.isValidUUID(req.params.uuid)) {
